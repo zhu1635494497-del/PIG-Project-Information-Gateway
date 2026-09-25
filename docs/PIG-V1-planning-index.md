@@ -1,8 +1,8 @@
 # PIG V1 当前规划索引 / PIG V1 Active Planning Index
 
-- 当前日期：2026-09-24 / Date: 2026-09-24
-- 当前阶段：Workbench W9 发布资格实施 / Current phase: Workbench W9 release-qualification implementation
-- 代码授权：W1–W9；D78–D91 已批准，正式外发仍受人工 Gate 约束 / Code authorization: W1-W9; D78-D91 approved, with official distribution still gated by human review
+- 当前日期：2026-09-25 / Date: 2026-09-25
+- 当前阶段：Workbench W10 性能与响应性稳定实施 / Current phase: Workbench W10 performance and responsiveness stabilization
+- 代码授权：W1–W10；D92–D99 已批准，正式外发仍受人工 Gate 约束 / Code authorization: W1-W10; D92-D99 approved, with official distribution still gated by human review
 
 ## 当前规范优先级 / Active authority order
 
@@ -36,6 +36,20 @@
 28. `docs/application/PIG-V1-workbench-W8.md`
 29. `docs/decisions/ADR-021-v1-release-qualification.md`
 30. `docs/application/PIG-V1-workbench-W9.md`
+31. `docs/decisions/ADR-022-v1-performance-responsiveness-stabilization.md`
+32. `docs/application/PIG-V1-workbench-W10.md`
+
+`docs/decisions/ADR-022-v1-performance-responsiveness-stabilization.md` 已接受，
+D92–D99 已批准。W10 在 `v1优化` 分支、基线 Commit
+`0a9de407cfbc2c209dc3e10259f01d845365230a` 上按 W10.1 至 W10.5 顺序实施；
+`v1.0.0-rc.1` 保持不变，通过性能与人工桌面验收后才可建立 `v1.0.0-rc.2`。
+
+`docs/decisions/ADR-022-v1-performance-responsiveness-stabilization.md` is
+accepted and D92-D99 are approved. W10 is implemented sequentially from W10.1
+through W10.5 on branch `v1优化`, based on commit
+`0a9de407cfbc2c209dc3e10259f01d845365230a`. `v1.0.0-rc.1` remains immutable;
+`v1.0.0-rc.2` may be created only after performance and manual desktop
+acceptance pass.
 
 `docs/decisions/ADR-021-v1-release-qualification.md` 已接受，D78–D91 已批准。W9 可以
 实施本地 Git、公开仓库准备、CI 和 Unsigned Internal RC；首次公开 Push 仍需精确文件
@@ -175,6 +189,22 @@ they do not define the target V1 Workbench product.
   context menus coexist with the toolbar.
 - D68-A：单个 Workspace 文件夹导出为保留结构的普通目录；
   one Workspace folder exports as an ordinary structure-preserving directory.
+- D92-A：保持 `v1.0.0-rc.1` 不变，W10 通过后建立 `v1.0.0-rc.2`；
+  keep `v1.0.0-rc.1` immutable and create `v1.0.0-rc.2` only after W10 passes.
+- D93-A：Set-based SQL Read Model，加数据库过滤、排序、分页和批量关联加载；
+  set-based SQL read model with database filtering, sorting, paging, and batched relations.
+- D94-A：`QTreeView + QAbstractItemModel` 按需加载与受影响分支增量刷新；
+  lazy `QTreeView + QAbstractItemModel` with affected-branch incremental refresh.
+- D95-A：同一 Source 事务中的有界批量 Repository 写入；
+  bounded bulk repository writes inside one Source transaction.
+- D96-A：单 Worker、串行写、Typed Progress 和安全点协作取消；
+  one worker, serialized writes, typed progress, and cooperative safe-point cancellation.
+- D97-A：保留不可变 Original、Copy+SHA、主动结构发现和终端延迟物化；
+  retain immutable Originals, copy-plus-hash, eager structure discovery, and lazy terminal materialization.
+- D98-A：允许只增加经 Query Plan 和 Benchmark 证明的 `0009` 索引；
+  allow only query-plan- and benchmark-proven indexes in migration `0009`.
+- D99-A：使用固定 Fixture、三轮中位数、Peak RSS、SQLite 大小和 UI 心跳验收；
+  qualify with fixed fixtures, three-run medians, peak RSS, SQLite size, and UI heartbeat.
 
 旧 Project 兼容性明确不在范围内。由于产品负责人指示无需考虑 D24，因此这里不
 记录任何 D24 选项。
@@ -184,11 +214,12 @@ as a D24 option because the owner instructed that D24 need not be considered.
 
 ## 当前授权门 / Current authorization gate
 
-产品负责人已确认 W8 源码桌面人工验收通过，并批准 W9 D78-A 至 D91-A。W9 当前实施
-公开源码仓库和 Release Qualification；正式签名外发必须等待全部人工 Gate。W9 不实施
-V2。
+产品负责人已批准 W10 D92-A 至 D99-A。W10 只能按 W10.1 至 W10.5 分阶段优化既有
+V1 Read、Import/Processing、Export、Progress/Cancel 和资格验证闭环；不得改变
+Original/Working 所有权、扩展到 V2、引入分布式 Worker 或绕过 W9 的人工发布 Gate。
 
-The owner confirmed W8 source-desktop manual acceptance and approved W9 D78-A
-through D91-A. W9 now implements the public-source repository and release
-qualification. Official signed distribution waits for every human gate. W9 does
-not implement V2.
+The owner approved W10 D92-A through D99-A. W10 may optimize only the existing
+V1 read, import/processing, export, progress/cancel, and qualification loops,
+sequentially from W10.1 through W10.5. It must not change Original/Working
+ownership, expand into V2, introduce distributed workers, or bypass W9 human
+release gates.

@@ -1,9 +1,9 @@
 # PIG V1 工作台里程碑计划 / Workbench Milestone Plan
 
 - 状态：规划基线 / Status: Planning baseline
-- 日期：2026-09-24 / Date: 2026-09-24
-- 当前授权：W8 验收通过；W9 仅授权规划 / Current authorization: W8 accepted; W9 planning only
-- 约束决策：`ADR-010`、`ADR-018`、`ADR-019`、`ADR-020` / Governing decisions: `ADR-010`, `ADR-018`, `ADR-019`, `ADR-020`
+- 日期：2026-09-25 / Date: 2026-09-25
+- 当前授权：W10 D92–D99 已批准，按 W10.1–W10.5 实施 / Current authorization: W10 D92-D99 approved for sequential W10.1-W10.5 implementation
+- 约束决策：`ADR-010`、`ADR-018`、`ADR-019`、`ADR-020`、`ADR-021`、`ADR-022` / Governing decisions: `ADR-010`, `ADR-018`, `ADR-019`, `ADR-020`, `ADR-021`, `ADR-022`
 
 ## 中文规范正文
 
@@ -144,7 +144,7 @@ Milestone 必须单独批准，并在进入下一阶段前完成可运行、可�
 - **验收**：自动化和 Prepared-data Desktop Acceptance 通过；External Distribution
   仍需 License Review 与 Signing。
 
-### W9：V1 Release Qualification 与发布闭环（提案）
+### W9：V1 Release Qualification 与发布闭环
 
 - **目标**：把已通过功能验收的 Workbench 转化为可明确发布或阻断的 V1 Candidate，
   不增加新业务能力。
@@ -161,6 +161,21 @@ Milestone 必须单独批准，并在进入下一阶段前完成可运行、可�
 - **验收**：D78–D91 全部批准；首次 Push 不含本地数据或 Secret；License、Signing、
   Clean-host、RAR、最终包人工验收全部通过；GitHub Release 资产与 Hash 一致，才能
   标记 V1 Release。否则保持 Internal RC。W9 不实施 V2 或应用内 Auto-update。
+
+### W10：性能与响应性稳定
+
+- **目标**：不改变 V1 产品语义，使大量文件、大体积文件和复杂 Container 的导入、
+  浏览、搜索、导出过程保持可观察、可取消且桌面窗口可响应。
+- **输入**：不可变 `v1.0.0-rc.1` 基线、现有 Benchmark，以及 D92-A 至 D99-A。
+- **核心实现**：W10.1 Set-based Read Model 与 Lazy Tree；W10.2 批量 Import/Processing
+  Persistence；W10.3 Export/Working File Pipeline；W10.4 Typed Progress、协作取消与
+  Resource Preflight；W10.5 性能资格验证和 `v1.0.0-rc.2` Candidate。
+- **数据落库**：允许 `0009_performance_indexes` 只增加有证据的索引；不增加物化 Read
+  Table、持久任务队列或新的业务真相。
+- **测试**：固定 80 MiB 单文件与 2,000 小文件 Fixture、10,000 节点 Tree/Search、
+  10,000-entry ZIP、500 文件导出、UI 心跳、取消安全点、重启一致性与全量回归。
+- **验收**：W10.1 至 W10.5 逐阶段通过；Original/Working/Lineage 语义不变；只有性能
+  自动验收和真实桌面验收均通过后才可创建 `v1.0.0-rc.2`。W10 不实施 V2。
 
 ## English normative text
 
@@ -537,7 +552,7 @@ packaged runtime, real desktop flow, and Original/Working integrity.
 The complete Workbench flow passes automated and prepared-data desktop
 acceptance. External distribution still requires license review and signing.
 
-## W9 - V1 release qualification and closure (proposed)
+## W9 - V1 release qualification and closure
 
 **Goal**
 
@@ -573,3 +588,41 @@ V1 is marked released only after D78-D91 are approved, the first push is free of
 local data and secrets, every license, signing, clean-host, RAR, and final-package
 manual gate passes, and the GitHub Release assets match their hashes. Otherwise
 it remains Internal RC. W9 implements neither V2 nor in-application auto-update.
+
+## W10 - Performance and responsiveness stabilization
+
+**Goal**
+
+Without changing V1 product semantics, keep import, browsing, search, and export
+responsive, observable, and cancellable with large files, many files, and
+complex containers.
+
+**Input**
+
+The immutable `v1.0.0-rc.1` baseline, the existing benchmark, and approved
+D92-A through D99-A.
+
+**Core work**
+
+W10.1 delivers a set-based read model and lazy tree; W10.2 adds batched
+import/processing persistence; W10.3 optimizes export and the Working File
+pipeline; W10.4 adds typed progress, cooperative cancellation, and resource
+preflight; W10.5 qualifies performance and prepares the `v1.0.0-rc.2`
+candidate.
+
+**Persistence**
+
+Migration `0009_performance_indexes` may add only evidence-backed indexes. W10
+adds no materialized read table, persistent job queue, or new business truth.
+
+**Tests**
+
+Fixed 80 MiB single-file and 2,000-small-file fixtures, a 10,000-node
+tree/search project, a 10,000-entry ZIP, 500-file export, UI heartbeat, safe
+cancellation, restart consistency, and full regression.
+
+**Acceptance**
+
+W10.1 through W10.5 pass sequentially; Original, Working, and lineage semantics
+remain unchanged; and `v1.0.0-rc.2` is created only after automated performance
+qualification and real desktop acceptance both pass. W10 does not implement V2.
