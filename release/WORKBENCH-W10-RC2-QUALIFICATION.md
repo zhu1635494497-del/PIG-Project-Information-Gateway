@@ -1,7 +1,7 @@
 # PIG Workbench W10 RC.2 资格报告 / RC.2 Qualification Report
 
 - 日期：2026-09-27 / Date: 2026-09-27
-- 状态：自动 Gate 已通过；人工桌面验收前仍不得建立 `v1.0.0-rc.2` / Status: Automated gates pass; `v1.0.0-rc.2` must not be created before manual desktop acceptance
+- 状态：自动 Gate 已通过；首次源码桌面验收发现的滚动卡顿已修复，等待源码与打包桌面复验；复验前仍不得建立 `v1.0.0-rc.2` / Status: Automated gates pass; the scrolling stall found in the first source-desktop acceptance is fixed and awaits source/package re-acceptance; `v1.0.0-rc.2` must not be created before that re-acceptance
 - 当前版本：`1.0.0rc1` / Current version: `1.0.0rc1`
 - 范围：W10.5 自动资格验证与人工验收准备 / Scope: W10.5 automated qualification and manual-acceptance preparation
 
@@ -14,11 +14,38 @@
 | Peak RSS | 最大约 `214.1 MiB`，通过 `≤300 MiB` / Maximum about `214.1 MiB`, passes `≤300 MiB` | Formal benchmark |
 | 首次 Progress / First progress | 单文件 `0.031s`，多文件 `0.029s`，通过 `≤0.5s` / Single file `0.031s`, many files `0.029s`, pass `≤0.5s` | Formal benchmark |
 | Query Plan | 现有索引足够；不创建 `0009` / Existing indexes are sufficient; no `0009` | Formal benchmark |
-| 全量回归 / Full regression | `172 passed, 95 skipped`，一个预期 Warning / `172 passed, 95 skipped`, one expected warning | Local test run |
+| Workspace UI 响应 / Workspace UI responsiveness | 10,000 行、201 个滚动步平均 `<25 ms`，无全量图标绘制 / 10,000 rows and 201 scroll steps average `<25 ms`, without eager icon painting | UI responsiveness regression |
+| 全量回归 / Full regression | `176 passed, 95 skipped`，一个预期 Warning / `176 passed, 95 skipped`, one expected warning | Local test run |
 | Migration | Head `0008_workbench_recovery`；`4 passed` / Head `0008_workbench_recovery`; `4 passed` | Focused migration run |
 | Windows Build | PyInstaller `onedir` 构建成功；ICU 冲突检查通过 / PyInstaller `onedir` build succeeds; ICU collision check passes | `dist/workbench-w10/PIG` |
 | Runtime Smoke | Exit code `0` / Exit code `0` | Current Windows host |
 | Packaged Flow | Exit code `0`，Report `PASS` / Exit code `0`, report `PASS` | `acceptance/workbench-w10-final-safe` |
+
+## 人工验收发现与修复 / Manual-Acceptance Finding and Fix
+
+2026-09-27 的首次源码桌面验收发现：处理完成后，点击 Workspace 或使用鼠标滚轮仍有
+明显卡顿。检查确认滚动没有触发数据库查询；卡顿来自 Qt Tree 展示热路径，包括重复
+图标生成、重复显示值组装、线性 Row 查找，以及辅助列的全内容自动测宽。
+
+The first source-desktop acceptance on 2026-09-27 found visible stalls when the
+Workspace was clicked or scrolled after processing had completed. Inspection
+confirmed that scrolling did not query the database. The stalls came from the
+Qt Tree presentation hot path: repeated icon generation, repeated display-value
+assembly, linear row lookup, and content-wide autosizing of secondary columns.
+
+修复仅改变 Read/UI Projection：Model 生命周期内缓存显示值和图标，预计算 Item Row，
+辅助列使用有界可调宽度，并启用像素级滚动。Domain、Original/Working、Lineage、状态、
+Event、权限和 SQLite Schema 均未改变。修复后专项测试 `11 passed`，全量回归
+`176 passed, 95 skipped`；重新构建包的 ICU 冲突检查、Runtime Smoke 与 Packaged Flow
+均通过。
+
+The fix changes only the Read/UI projection: display values and icons are cached
+for the model lifetime, item rows are precomputed, secondary columns use bounded
+user-adjustable widths, and scrolling is pixel-based. Domain, Original/Working,
+Lineage, state, Events, permissions, and the SQLite schema are unchanged. The
+focused suite reports `11 passed`, the full regression reports `176 passed, 95
+skipped`, and the rebuilt package passes the ICU collision check, runtime smoke,
+and packaged flow.
 
 ## 数据与安全语义 / Data and Safety Semantics
 
@@ -38,8 +65,8 @@ copy-plus-hash.
 
 ## 尚未通过的 Gate / Open Gates
 
-- [ ] 完成源码桌面真实数据验收。 / Complete source-desktop real-data acceptance.
-- [ ] 完成最终打包桌面真实数据验收。 / Complete final-package real-data acceptance.
+- [ ] 使用滚动修复重新完成源码桌面真实数据验收。 / Repeat source-desktop real-data acceptance with the scrolling fix.
+- [ ] 使用同一修复重新完成最终打包桌面真实数据验收。 / Repeat final-package real-data acceptance with the same fix.
 - [ ] W9 License、Signing、Clean-host、真实 RAR 与最终签名包 Gate 继续保持。 / Keep
   the W9 license, signing, clean-host, real-RAR, and final signed-package gates.
 

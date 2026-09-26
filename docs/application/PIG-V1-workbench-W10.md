@@ -1,6 +1,6 @@
 # PIG V1 Workbench W10 性能与响应性稳定 / Performance and Responsiveness Stabilization
 
-- 状态：W10.1–W10.4 已完成；W10.5 自动资格 Gate 已通过，等待人工桌面验收 / Status: W10.1-W10.4 complete; W10.5 automated qualification gates pass, pending manual desktop acceptance
+- 状态：W10.1–W10.4 已完成；W10.5 自动资格 Gate 已通过，源码桌面首次人工验收发现滚动卡顿并已修复，等待复验 / Status: W10.1-W10.4 complete; W10.5 automated qualification gates pass; the first source-desktop acceptance found a scrolling stall that is now fixed and pending re-acceptance
 - 日期：2026-09-25 / Date: 2026-09-25
 - 决策：`ADR-022`，D92-A 至 D99-A / Decisions: `ADR-022`, D92-A through D99-A
 - 分支：`v1优化` / Branch: `v1优化`
@@ -90,6 +90,20 @@ not stop responding because it constructs every widget eagerly.
   Index 约 `0.00002s`。 / Resetting the 10,000-item Qt model takes `0.010s`;
   no item indexes are prebuilt after reset, and one requested index takes about
   `0.00002s`.
+- 2026-09-27 源码桌面人工验收发现 Workspace 点击与滚轮仍有可感知停顿。根因位于
+  Qt 展示热路径：行重绘会重复生成图标和显示值，Sibling Row 查找为线性扫描，且
+  三个辅助列使用全内容自动测宽。修复后显示值与图标按 Model 生命周期缓存，Row
+  查找使用预计算映射，辅助列改为有界可调宽度，Tree 使用像素级滚动。新增 10,000
+  行、201 个滚动步的 UI Gate，要求平均每步低于 `25 ms` 且不得全量绘制图标；当前
+  参考主机通过。 / Source-desktop acceptance on 2026-09-27 found perceptible
+  stalls when clicking and scrolling the Workspace. The cause was in the Qt
+  presentation hot path: row repaints regenerated icons and display values,
+  sibling-row lookup was linear, and three secondary columns measured all
+  content for width. Display values and icons are now cached for the model
+  lifetime, row lookup uses a precomputed map, secondary columns use bounded
+  user-adjustable widths, and the Tree scrolls per pixel. A new 10,000-row,
+  201-step UI gate requires less than `25 ms` per step on average without eager
+  icon painting; it passes on the reference host.
 - 全量回归：`149 passed, 95 skipped`；Skip 属于 ADR-010 后的历史 Contract 或主机
   Symlink 限制。 / Full regression: `149 passed, 95 skipped`; skips are historical
   contracts superseded by ADR-010 or host symlink restrictions.
@@ -387,16 +401,19 @@ not stop responding because it constructs every widget eagerly.
   Migration。 / Query plans use the existing `ix_workspace_items_origin`,
   `ix_processing_events_project_time`, and related unique indexes. No evidence
   justifies `0009`, so no migration is created.
-- 最终全量回归为 `172 passed, 95 skipped`，另有一个预期 Duplicate ZIP Warning；
+- 滚动响应性修复后的最终全量回归为 `176 passed, 95 skipped`，另有一个预期 Duplicate ZIP Warning；
   Migration Head 为 `0008_workbench_recovery`，专项 Migration 测试 `4 passed`。 /
-  Final full regression is `172 passed, 95 skipped`, with one expected duplicate-
-  ZIP warning. Migration head is `0008_workbench_recovery`, and the focused
-  migration suite reports `4 passed`.
+  Final full regression after the scrolling-responsiveness fix is `176 passed,
+  95 skipped`, with one expected duplicate-ZIP warning. Migration head is
+  `0008_workbench_recovery`, and the focused migration suite reports `4 passed`.
 - W10.5 自动性能、Migration、测试与 Package Gate 已通过；源码与最终打包桌面人工验收
-  尚未执行。版本保持 `1.0.0rc1`，人工验收前不得创建 `v1.0.0-rc.2` Tag 或 Release。 /
+  仍需对滚动修复重新执行。重新构建包的 ICU 冲突检查、Runtime Smoke 与 Packaged Flow
+  已通过。版本保持 `1.0.0rc1`，人工验收前不得创建 `v1.0.0-rc.2` Tag 或 Release。 /
   W10.5 automated performance, migration, test, and package gates pass; source
-  and final-package manual desktop acceptance have not run. Version remains
-  `1.0.0rc1`; no `v1.0.0-rc.2` tag or release may be created.
+  and final-package manual desktop acceptance must be rerun for the scrolling
+  fix. The rebuilt package passes the ICU collision check, runtime smoke, and
+  packaged flow. Version remains `1.0.0rc1`; no `v1.0.0-rc.2` tag or release may
+  be created.
 
 ## 实施顺序 / Implementation Order
 

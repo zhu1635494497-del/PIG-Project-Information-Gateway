@@ -142,6 +142,9 @@ class WorkspaceTreeModel(QAbstractItemModel):
         self._children: dict[str | None, tuple[str, ...]] = {None: ()}
         self._id_to_key: dict[str, int] = {}
         self._key_to_id: dict[int, str] = {}
+        self._row_by_id: dict[str, int] = {}
+        self._display_values: dict[str, tuple[str, str, str, str]] = {}
+        self._icons: dict[str, object] = {}
 
     def set_views(self, views: Iterable[WorkspaceItemView]) -> None:
         values = tuple(views)
@@ -150,15 +153,12 @@ class WorkspaceTreeModel(QAbstractItemModel):
             children.setdefault(
                 view.placement.parent_workspace_item_id, []
             ).append(view)
-        self.beginResetModel()
-        self._views = {view.item.id: view for view in values}
-        self._id_to_key = {
-            item_id: key for key, item_id in enumerate(self._views, start=1)
+        views = {view.item.id: view for view in values}
+        id_to_key = {
+            item_id: key for key, item_id in enumerate(views, start=1)
         }
-        self._key_to_id = {
-            key: item_id for item_id, key in self._id_to_key.items()
-        }
-        self._children = {
+        key_to_id = {key: item_id for item_id, key in id_to_key.items()}
+        ordered_children = {
             parent_id: tuple(
                 view.item.id
                 for view in sorted(
@@ -171,7 +171,34 @@ class WorkspaceTreeModel(QAbstractItemModel):
             )
             for parent_id, child_views in children.items()
         }
-        self._children.setdefault(None, ())
+        ordered_children.setdefault(None, ())
+        row_by_id = {
+            item_id: row
+            for child_ids in ordered_children.values()
+            for row, item_id in enumerate(child_ids)
+        }
+        display_values = {
+            item_id: (
+                view.item.display_name,
+                view.item.item_kind.value,
+                "" if view.source_node is None else view.source_node.format.value,
+                (
+                    view.working_artifact.content_status.value
+                    if view.working_artifact is not None
+                    else view.item.materialization_status.value
+                ),
+            )
+            for item_id, view in views.items()
+        }
+
+        self.beginResetModel()
+        self._views = views
+        self._id_to_key = id_to_key
+        self._key_to_id = key_to_id
+        self._children = ordered_children
+        self._row_by_id = row_by_id
+        self._display_values = display_values
+        self._icons = {}
         self.endResetModel()
 
     @property
@@ -182,12 +209,8 @@ class WorkspaceTreeModel(QAbstractItemModel):
         view = self._views.get(item_id)
         if view is None:
             return QModelIndex()
-        siblings = self._children.get(
-            view.placement.parent_workspace_item_id, ()
-        )
-        try:
-            row = siblings.index(item_id)
-        except ValueError:
+        row = self._row_by_id.get(item_id)
+        if row is None:
             return QModelIndex()
         return self.createIndex(row, column, self._id_to_key[item_id])
 
@@ -223,12 +246,8 @@ class WorkspaceTreeModel(QAbstractItemModel):
         parent_view = self._views.get(parent_id)
         if parent_view is None:
             return QModelIndex()
-        siblings = self._children.get(
-            parent_view.placement.parent_workspace_item_id, ()
-        )
-        try:
-            row = siblings.index(parent_id)
-        except ValueError:
+        row = self._row_by_id.get(parent_id)
+        if row is None:
             return QModelIndex()
         return self.createIndex(row, 0, self._id_to_key[parent_id])
 
@@ -248,24 +267,20 @@ class WorkspaceTreeModel(QAbstractItemModel):
         if view is None:
             return None
         if role == Qt.ItemDataRole.DisplayRole:
-            values = (
-                view.item.display_name,
-                view.item.item_kind.value,
-                "" if view.source_node is None else view.source_node.format.value,
-                (
-                    view.working_artifact.content_status.value
-                    if view.working_artifact is not None
-                    else view.item.materialization_status.value
-                ),
-            )
-            return values[index.column()]
+            return self._display_values[view.item.id][index.column()]
         if role == Qt.ItemDataRole.DecorationRole and index.column() == 0:
-            return None if self._icon_provider is None else self._icon_provider(view)
+            if self._icon_provider is None:
+                return None
+            icon = self._icons.get(view.item.id)
+            if icon is None:
+                icon = self._icon_provider(view)
+                self._icons[view.item.id] = icon
+            return icon
         if role == Qt.ItemDataRole.ToolTipRole:
             if index.column() == 0:
                 return view.workspace_path
             if index.column() == 3:
-                return self.data(index, Qt.ItemDataRole.DisplayRole)
+                return self._display_values[view.item.id][3]
         if role == ITEM_ID_ROLE:
             return view.item.id
         if role == ITEM_KIND_ROLE:
@@ -360,6 +375,15 @@ class WorkspaceTree(QTreeView):
         self.setModel(WorkspaceTreeModel(icon_provider, self))
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setAnimated(False)
+        self.setUniformRowHeights(True)
+        self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column, width in ((1, 110), (2, 100), (3, 140)):
+            self.header().setSectionResizeMode(
+                column, QHeaderView.ResizeMode.Interactive
+            )
+            self.header().resizeSection(column, width)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
@@ -537,6 +561,7 @@ class MainWindow(QMainWindow):
         self._reload_after_background = False
         self._closed = False
         self._opened_names: dict[str, str] = {}
+        self._workspace_icons: dict[WorkspaceItemKind, object] = {}
         self._project_name = "PIG-Workspace"
         self._recovery_required = False
         self._recovery_inspection_token: str | None = None
@@ -713,11 +738,6 @@ class MainWindow(QMainWindow):
         self.tree.setUniformRowHeights(True)
         self.tree.setIndentation(20)
         self.tree.header().setHighlightSections(False)
-        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in (1, 2, 3):
-            self.tree.header().setSectionResizeMode(
-                column, QHeaderView.ResizeMode.ResizeToContents
-            )
         self.tree.itemSelectionChanged.connect(self._tree_selection_changed)
         self.tree.itemDoubleClicked.connect(self._tree_double_clicked)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -894,12 +914,17 @@ class MainWindow(QMainWindow):
         self.project_state.style().polish(self.project_state)
 
     def _workspace_item_icon(self, view: WorkspaceItemView):
+        cached = self._workspace_icons.get(view.item.item_kind)
+        if cached is not None:
+            return cached
         standard_icon = (
             QStyle.StandardPixmap.SP_FileIcon
             if view.item.item_kind == WorkspaceItemKind.FILE
             else QStyle.StandardPixmap.SP_DirIcon
         )
-        return self.style().standardIcon(standard_icon)
+        icon = self.style().standardIcon(standard_icon)
+        self._workspace_icons[view.item.item_kind] = icon
+        return icon
 
     def _new_project(self) -> None:
         name, accepted = QInputDialog.getText(self, "新建项目", "项目名称")
