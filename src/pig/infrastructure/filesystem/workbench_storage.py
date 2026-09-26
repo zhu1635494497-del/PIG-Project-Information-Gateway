@@ -8,7 +8,7 @@ import stat
 from datetime import datetime, timezone
 from contextlib import AbstractContextManager
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Callable
+from typing import BinaryIO, Callable, Optional
 
 from pig.application.errors import ApplicationError
 from pig.application.ports import StoredWorkingContent, WorkingContentObservation
@@ -305,6 +305,31 @@ class LocalWorkingArtifactStore:
                 ),
             )
         raise AssertionError("working observation loop did not return")
+
+    def unchanged_path(
+        self,
+        project_path: Path,
+        storage_key: str,
+        *,
+        expected_size: int,
+        expected_modified_at: datetime,
+    ) -> Optional[Path]:
+        try:
+            _project, target = self._controlled_path(project_path, storage_key)
+            value = target.lstat()
+        except (ApplicationError, OSError):
+            return None
+        if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+            return None
+        observed_modified_at = datetime.fromtimestamp(
+            value.st_mtime, tz=timezone.utc
+        )
+        if (
+            value.st_size != expected_size
+            or observed_modified_at != expected_modified_at
+        ):
+            return None
+        return target
 
     def restore(
         self,

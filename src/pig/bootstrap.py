@@ -182,8 +182,10 @@ def create_local_application(
     workspace_query_service = WorkspaceQueryService(database=database)
     workspace_export_service = WorkspaceExportService(
         database=database,
+        originals=original_snapshot_store,
         structure_service=structure_service,
         working_file_service=working_file_service,
+        working_store=working_store,
         store=LocalWorkspaceExportStore(),
         clock=effective_clock,
         id_generator=effective_id_generator,

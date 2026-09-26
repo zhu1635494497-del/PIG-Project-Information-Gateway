@@ -1232,6 +1232,54 @@ class SqlAlchemyWorkspaceRepository:
             else self._read_record(row, path_index[item_id])
         )
 
+    def original_artifacts_for_source_nodes(
+        self, source_node_ids: Sequence[str]
+    ) -> dict[str, entities.OriginalArtifact]:
+        node_ids = tuple(dict.fromkeys(source_node_ids))
+        if not node_ids:
+            return {}
+        resolved: dict[str, entities.OriginalArtifact] = {}
+        locator_rows = self._session.execute(
+            select(
+                models.SourceEntryLocatorModel.child_node_id,
+                models.OriginalArtifactModel,
+            )
+            .join(
+                models.OriginalSnapshotEntryModel,
+                models.OriginalSnapshotEntryModel.id
+                == models.SourceEntryLocatorModel.snapshot_entry_id,
+            )
+            .join(
+                models.OriginalArtifactModel,
+                models.OriginalArtifactModel.id
+                == models.OriginalSnapshotEntryModel.artifact_id,
+            )
+            .where(
+                models.SourceEntryLocatorModel.child_node_id.in_(node_ids),
+                models.SourceEntryLocatorModel.kind
+                == enums.MaterializationLocatorKind.SNAPSHOT_ENTRY,
+            )
+        ).all()
+        for node_id, artifact in locator_rows:
+            resolved[node_id] = _original_artifact_from_model(artifact)
+        root_rows = self._session.execute(
+            select(
+                models.OriginalSnapshotEntryModel.source_node_id,
+                models.OriginalArtifactModel,
+            )
+            .join(
+                models.OriginalArtifactModel,
+                models.OriginalArtifactModel.id
+                == models.OriginalSnapshotEntryModel.artifact_id,
+            )
+            .where(
+                models.OriginalSnapshotEntryModel.source_node_id.in_(node_ids)
+            )
+        ).all()
+        for node_id, artifact in root_rows:
+            resolved.setdefault(node_id, _original_artifact_from_model(artifact))
+        return resolved
+
     def search_read_records(
         self,
         project_id: str,

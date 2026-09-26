@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable
@@ -13,7 +14,9 @@ from pig.application.contracts import (
 )
 from pig.application.errors import ApplicationError
 from pig.application.ports import (
+    OriginalSnapshotStore,
     ProjectDatabaseProvider,
+    WorkingArtifactStore,
     WorkspaceExportDirectory,
     WorkspaceExportEntry,
     WorkspaceExportStore,
@@ -23,6 +26,7 @@ from pig.domain.enums import (
     ErrorCode,
     EventSeverity,
     EventType,
+    NodeProcessingStatus,
     WorkingContentStatus,
     WorkingRefreshReason,
     WorkspaceItemKind,
@@ -52,15 +56,19 @@ class WorkspaceExportService:
         self,
         *,
         database: ProjectDatabaseProvider,
+        originals: OriginalSnapshotStore,
         structure_service,
         working_file_service,
+        working_store: WorkingArtifactStore,
         store: WorkspaceExportStore,
         clock: Clock = _utc_now,
         id_generator: IdGenerator = _new_id,
     ) -> None:
         self._database = database
+        self._originals = originals
         self._structure = structure_service
         self._working_files = working_file_service
+        self._working_store = working_store
         self._store = store
         self._clock = clock
         self._new_id = id_generator
@@ -97,88 +105,105 @@ class WorkspaceExportService:
             if project is None:
                 raise EntityNotFoundError(f"project not found: {project_id}")
             self._project(project, database_path)
-            all_items = tuple(
-                uow.workspace.items_for_project(project_id, include_deleted=True)
-            )
-            by_id = {item.id: item for item in all_items}
-            placements = {
-                item.id: uow.workspace.get_placement(item.id) for item in all_items
-            }
+            records = tuple(uow.workspace.read_records_for_project(project_id))
+            by_id = {record.item.id: record for record in records}
             selected = []
             for item_id in item_ids:
-                item = by_id.get(item_id)
-                if item is None:
+                record = by_id.get(item_id)
+                if record is None:
                     raise EntityNotFoundError(f"workspace item not found: {item_id}")
-                if not uow.workspace.is_effectively_active(item.id):
+                if not record.effectively_active:
                     raise ApplicationError(
                         "EXPORT_ITEM_DENIED",
                         "only effectively active Workspace items can be exported",
-                        {"workspace_item_id": item.id},
+                        {"workspace_item_id": record.item.id},
                     )
-                selected.append(item)
-            if len(selected) == 1 and selected[0].item_kind == WorkspaceItemKind.FILE:
+                selected.append(record)
+            if (
+                len(selected) == 1
+                and selected[0].item.item_kind == WorkspaceItemKind.FILE
+            ):
                 export_kind = WorkspaceExportKind.FILE
                 export_items = tuple(selected)
                 export_directories = ()
-            elif len(selected) == 1 and selected[0].item_kind == WorkspaceItemKind.FOLDER:
+            elif (
+                len(selected) == 1
+                and selected[0].item.item_kind == WorkspaceItemKind.FOLDER
+            ):
                 export_kind = WorkspaceExportKind.DIRECTORY
-                directory_root_id = selected[0].id
-                subtree = self._active_subtree(
-                    selected[0].id, by_id, placements, uow.workspace
-                )
+                directory_root_id = selected[0].item.id
+                subtree = self._active_subtree(directory_root_id, by_id)
                 export_items = tuple(
-                    value for value in subtree if value.item_kind == WorkspaceItemKind.FILE
+                    value
+                    for value in subtree
+                    if value.item.item_kind == WorkspaceItemKind.FILE
                 )
                 export_directories = tuple(
                     value
                     for value in subtree
-                    if value.item_kind != WorkspaceItemKind.FILE
-                    and value.id != directory_root_id
+                    if value.item.item_kind != WorkspaceItemKind.FILE
+                    and value.item.id != directory_root_id
                 )
             else:
                 export_kind = WorkspaceExportKind.ZIP
                 expanded = []
                 seen: set[str] = set()
                 for value in selected:
-                    if value.item_kind == WorkspaceItemKind.CONTAINER_VIEW:
+                    if value.item.item_kind == WorkspaceItemKind.CONTAINER_VIEW:
                         raise ApplicationError(
                             "EXPORT_ITEM_DENIED",
                             "select an ordinary folder or terminal files for export",
                         )
                     candidates = (
                         (value,)
-                        if value.item_kind == WorkspaceItemKind.FILE
-                        else self._active_subtree(
-                            value.id, by_id, placements, uow.workspace
-                        )
+                        if value.item.item_kind == WorkspaceItemKind.FILE
+                        else self._active_subtree(value.item.id, by_id)
                     )
                     for candidate in candidates:
-                        if candidate.id not in seen:
-                            seen.add(candidate.id)
+                        if candidate.item.id not in seen:
+                            seen.add(candidate.item.id)
                             expanded.append(candidate)
                 export_items = tuple(
-                    value for value in expanded if value.item_kind == WorkspaceItemKind.FILE
+                    value
+                    for value in expanded
+                    if value.item.item_kind == WorkspaceItemKind.FILE
                 )
                 export_directories = tuple(
-                    value for value in expanded if value.item_kind != WorkspaceItemKind.FILE
+                    value
+                    for value in expanded
+                    if value.item.item_kind != WorkspaceItemKind.FILE
                 )
-            if any(value.origin_source_node_id is None for value in export_items):
+            if any(
+                value.item.origin_source_node_id is None
+                for value in export_items
+            ):
                 raise ApplicationError(
                     "EXPORT_ITEM_DENIED",
                     "every exported file must be source-backed",
                 )
             if export_kind == WorkspaceExportKind.DIRECTORY:
                 relative_paths = {
-                    item.id: self._relative_from_root(
-                        item.id, directory_root_id, by_id, placements
+                    record.item.id: self._relative_from_root(
+                        record, by_id[directory_root_id]
                     )
-                    for item in (*export_items, *export_directories)
+                    for record in (*export_items, *export_directories)
                 }
             else:
                 relative_paths = {
-                    item.id: self._relative_path(item.id, by_id, placements)
-                    for item in (*export_items, *export_directories)
+                    record.item.id: self._safe_workspace_path(
+                        record.workspace_path
+                    )
+                    for record in (*export_items, *export_directories)
                 }
+            source_node_ids = tuple(
+                record.item.origin_source_node_id
+                for record in export_items
+                if record.working_artifact is None
+                and record.item.origin_source_node_id is not None
+            )
+            direct_originals = uow.workspace.original_artifacts_for_source_nodes(
+                source_node_ids
+            )
             self._event(
                 uow,
                 EventType.WORKSPACE_EXPORT_REQUESTED,
@@ -215,10 +240,25 @@ class WorkspaceExportService:
             raise failure
         try:
             entries = []
-            for item in export_items:
-                with self._database.unit_of_work(database_path) as uow:
-                    artifact = uow.workspace.working_artifact_for_item(item.id)
-                if artifact is None:
+            for record in export_items:
+                item = record.item
+                artifact = record.working_artifact
+                original = direct_originals.get(
+                    item.origin_source_node_id or ""
+                )
+                if artifact is None and original is not None:
+                    if (
+                        record.source_node is None
+                        or record.source_node.status != NodeProcessingStatus.SUCCESS
+                    ):
+                        raise ApplicationError(
+                            "SOURCE_NODE_NOT_MATERIALIZABLE",
+                            "source node is not a successful terminal file",
+                        )
+                    path = self._originals.artifact_path(project_path, original)
+                    size = original.size
+                    sha256 = original.sha256
+                elif artifact is None:
                     materialized = self._structure.materialize(
                         MaterializeWorkspaceItemRequest(
                             project_id=project_id,
@@ -230,34 +270,57 @@ class WorkspaceExportService:
                     )
                     artifact = materialized.working_artifact
                     path = materialized.path
+                    size = artifact.current_size
+                    sha256 = artifact.current_sha256
                 else:
-                    refreshed = self._working_files.refresh(
-                        RefreshWorkingArtifactRequest(
-                            project_id=project_id,
-                            database_path=database_path,
-                            workspace_item_id=item.id,
-                            actor=actor,
-                            reason=WorkingRefreshReason.EXPLICIT,
+                    path = None
+                    checkpoint = record.current_revision
+                    if (
+                        checkpoint is not None
+                        and checkpoint.size == artifact.current_size
+                        and checkpoint.sha256 == artifact.current_sha256
+                        and artifact.content_status
+                        not in {
+                            WorkingContentStatus.MISSING,
+                            WorkingContentStatus.UNREADABLE,
+                        }
+                    ):
+                        path = self._working_store.unchanged_path(
+                            project_path,
+                            artifact.storage_key,
+                            expected_size=artifact.current_size,
+                            expected_modified_at=checkpoint.file_modified_at,
                         )
-                    )
-                    artifact = refreshed.working_artifact
-                    path = refreshed.path
-                if artifact.content_status in {
-                    WorkingContentStatus.MISSING,
-                    WorkingContentStatus.UNREADABLE,
-                }:
-                    raise ApplicationError(
-                        ErrorCode.EXPORT_FAILED.value,
-                        "a selected Working File is unavailable",
-                        {"workspace_item_id": item.id},
-                    )
+                    if path is None:
+                        refreshed = self._working_files.refresh(
+                            RefreshWorkingArtifactRequest(
+                                project_id=project_id,
+                                database_path=database_path,
+                                workspace_item_id=item.id,
+                                actor=actor,
+                                reason=WorkingRefreshReason.EXPLICIT,
+                            )
+                        )
+                        artifact = refreshed.working_artifact
+                        path = refreshed.path
+                    if artifact.content_status in {
+                        WorkingContentStatus.MISSING,
+                        WorkingContentStatus.UNREADABLE,
+                    }:
+                        raise ApplicationError(
+                            ErrorCode.EXPORT_FAILED.value,
+                            "a selected Working File is unavailable",
+                            {"workspace_item_id": item.id},
+                        )
+                    size = artifact.current_size
+                    sha256 = artifact.current_sha256
                 entries.append(
                     WorkspaceExportEntry(
                         workspace_item_id=item.id,
                         relative_path=relative_paths[item.id],
                         source_path=path,
-                        size=artifact.current_size,
-                        sha256=artifact.current_sha256,
+                        size=size,
+                        sha256=sha256,
                     )
                 )
             stored = self._store.write(
@@ -265,7 +328,9 @@ class WorkspaceExportService:
                 operation_id,
                 tuple(entries),
                 tuple(
-                    WorkspaceExportDirectory(relative_path=relative_paths[value.id])
+                    WorkspaceExportDirectory(
+                        relative_path=relative_paths[value.item.id]
+                    )
                     for value in export_directories
                 ),
                 export_kind=export_kind,
@@ -304,57 +369,45 @@ class WorkspaceExportService:
         )
 
     @staticmethod
-    def _active_subtree(root_id, by_id, placements, repository):
+    def _active_subtree(root_id, by_id):
         children: dict[str | None, list] = {}
-        for item_id, placement in placements.items():
-            if placement is not None:
-                children.setdefault(placement.parent_workspace_item_id, []).append(item_id)
+        for item_id, record in by_id.items():
+            children.setdefault(
+                record.placement.parent_workspace_item_id, []
+            ).append(item_id)
         result = []
-        queue = [root_id]
+        queue = deque([root_id])
         while queue:
-            current = queue.pop(0)
-            item = by_id.get(current)
-            if item is None or not repository.is_effectively_active(current):
+            current = queue.popleft()
+            record = by_id.get(current)
+            if record is None or not record.effectively_active:
                 continue
-            result.append(item)
+            result.append(record)
             queue.extend(children.get(current, ()))
         return tuple(result)
 
     @staticmethod
-    def _relative_path(item_id, by_id, placements) -> str:
-        parts: list[str] = []
-        current = item_id
-        visited: set[str] = set()
-        while current is not None:
-            if current in visited:
-                raise InvariantViolationError("workspace placement contains a cycle")
-            visited.add(current)
-            item = by_id.get(current)
-            placement = placements.get(current)
-            if item is None or placement is None:
-                raise InvariantViolationError("workspace placement parent is missing")
-            parts.append(safe_filesystem_segment(item.display_name))
-            current = placement.parent_workspace_item_id
-        return str(PurePosixPath(*reversed(parts)))
+    def _safe_workspace_path(workspace_path: str) -> str:
+        parts = workspace_path.split("/")
+        if not parts or any(not part for part in parts):
+            raise InvariantViolationError("workspace path is invalid")
+        return str(
+            PurePosixPath(
+                *(safe_filesystem_segment(part) for part in parts)
+            )
+        )
 
-    @staticmethod
-    def _relative_from_root(item_id, root_id, by_id, placements) -> str:
-        parts: list[str] = []
-        current = item_id
-        visited: set[str] = set()
-        while current != root_id:
-            if current is None or current in visited:
-                raise InvariantViolationError("item is outside the selected export folder")
-            visited.add(current)
-            item = by_id.get(current)
-            placement = placements.get(current)
-            if item is None or placement is None:
-                raise InvariantViolationError("workspace placement parent is missing")
-            parts.append(safe_filesystem_segment(item.display_name))
-            current = placement.parent_workspace_item_id
-        if not parts:
+    @classmethod
+    def _relative_from_root(cls, record, root) -> str:
+        prefix = f"{root.workspace_path}/"
+        if not record.workspace_path.startswith(prefix):
+            raise InvariantViolationError(
+                "item is outside the selected export folder"
+            )
+        relative = record.workspace_path[len(prefix) :]
+        if not relative:
             raise InvariantViolationError("folder export root is not a content entry")
-        return str(PurePosixPath(*reversed(parts)))
+        return cls._safe_workspace_path(relative)
 
     def _failed(self, database_path, project_id, actor, operation_id, failure) -> None:
         try:

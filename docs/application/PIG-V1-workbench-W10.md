@@ -1,6 +1,6 @@
 # PIG V1 Workbench W10 性能与响应性稳定 / Performance and Responsiveness Stabilization
 
-- 状态：已批准；W10.1–W10.2 已完成，W10.3 待进入 / Status: Approved; W10.1-W10.2 complete, W10.3 pending entry
+- 状态：已批准；W10.1–W10.3 已完成，W10.4 待进入 / Status: Approved; W10.1-W10.3 complete, W10.4 pending entry
 - 日期：2026-09-25 / Date: 2026-09-25
 - 决策：`ADR-022`，D92-A 至 D99-A / Decisions: `ADR-022`, D92-A through D99-A
 - 分支：`v1优化` / Branch: `v1优化`
@@ -178,6 +178,54 @@ not stop responding because it constructs every widget eagerly.
 - **验收 / Acceptance**：同参考主机 500 小文件 Folder Export 不高于 25 秒，ZIP
   Export 不高于 13 秒。 / On the reference host, 500-small-file
   folder export is at most 25 seconds and ZIP export at most 13 seconds.
+
+### W10.3 实施证据 / W10.3 Implementation Evidence
+
+- 完成日期：2026-09-26。 / Completed: 2026-09-26.
+- Export Application 使用一次 set-based Workspace Read Projection 和两条有界
+  Original Artifact 查询完成选择、有效状态、子树、路径、Working 与 Source 映射；
+  不再为每个 Item 重复打开读事务。 / The Export Application now uses one
+  set-based Workspace Read Projection and two bounded Original Artifact queries
+  for selection, effective state, subtree, path, Working, and Source mapping; it
+  no longer opens repeated read transactions for every Item.
+- 未编辑且可直接映射到 Project Original Snapshot 的 Virtual 文件从不可变 Original
+  流式导出，不再为了交付而创建 Working File 和 Working Version；Archive/Email 内部
+  成员仍使用既有安全 Materialization Recipe。 / Unedited Virtual files that map
+  directly to the Project Original Snapshot are streamed from immutable
+  Originals without creating a Working File and Working Version merely for
+  delivery. Archive and email members continue to use the existing safe
+  materialization recipe.
+- Working File 的持久 Checkpoint 与当前 size/mtime 一致时跳过导出前完整 Hash；最终
+  复制或 ZIP 写入仍在单次流式读取中计算 SHA-256，并同时验证前后文件事实，因此
+  相同 size/mtime 的内容篡改仍会失败。 / A Working File skips the pre-export
+  full hash when its persisted checkpoint matches current size/mtime. The final
+  copy or ZIP write still computes SHA-256 in the single streaming read and
+  validates before/after file facts, so content tampering with unchanged
+  size/mtime still fails.
+- 普通目录、ZIP 和单文件输出继续使用受控相对路径、Collision 检查、显式 Replace
+  Confirmation、暂存输出及失败清理；单文件保留发布前 `fsync`，目录不再为每个小文件
+  单独 `fsync`。 / Directory, ZIP, and single-file outputs retain controlled
+  relative paths, collision checks, explicit replacement confirmation, staged
+  output, and failure cleanup. Single-file publication keeps its pre-publish
+  `fsync`, while directory export no longer performs one `fsync` per small file.
+- 同参考主机三轮中位数：500 文件 Folder Export `1.655s`，旧基线 `71.074s`；500 文件
+  ZIP Export `1.225s`，旧基线 `21.205s`。两项最大 Peak RSS 为 `111,833,088`
+  bytes（约 `106.7 MiB`）。 / Three-run medians on the reference host are
+  `1.655s` for a 500-file Folder Export versus the old `71.074s`, and `1.225s`
+  for a 500-file ZIP Export versus the old `21.205s`. Maximum Peak RSS across
+  both measurements is `111,833,088` bytes (about `106.7 MiB`).
+- 新增虚拟 Original 直出、Working 快速路径和相同 stat 内容变化拒绝测试；既有
+  Modified/Missing/Unreadable、Collision、Empty Folder、Replace Confirmation 与失败
+  原子清理回归保持通过。 / Added tests for direct Virtual-to-Original export,
+  the Working fast path, and rejection of same-stat content changes; existing
+  Modified/Missing/Unreadable, collision, empty-folder, replacement-confirmation,
+  and atomic failure-cleanup regressions remain green.
+- 全量回归：`158 passed, 95 skipped`，另有一个预期 Duplicate ZIP Warning。 / Full
+  regression: `158 passed, 95 skipped`, with one expected duplicate-ZIP warning.
+- 本阶段不增加 Migration、UI 页面、Tool、AI、Automation 或 Progress/Cancel；Typed
+  Progress、协作取消和 Resource Preflight 仍属于 W10.4。 / This phase adds no
+  migration, UI page, Tool, AI, Automation, or Progress/Cancel. Typed progress,
+  cooperative cancellation, and resource preflight remain W10.4 work.
 
 ## W10.4：Progress、Cancel 与 Resource Preflight / Progress, Cancel, and Resource Preflight
 

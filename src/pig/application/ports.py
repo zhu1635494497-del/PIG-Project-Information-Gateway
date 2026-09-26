@@ -213,6 +213,15 @@ class WorkingArtifactStore(Protocol):
         stability_retries: int,
     ) -> WorkingContentObservation: ...
 
+    def unchanged_path(
+        self,
+        project_path: Path,
+        storage_key: str,
+        *,
+        expected_size: int,
+        expected_modified_at: datetime,
+    ) -> Optional[Path]: ...
+
     def restore(
         self,
         project_path: Path,

@@ -86,15 +86,13 @@ class LocalWorkspaceExportStore:
                     staging, entries, directories, maximum_total_size, chunk_size
                 )
             else:
-                total = self._copy_file(
-                    entries[0], staging, maximum_total_size, chunk_size
+                size, sha256 = self._copy_file(
+                    entries[0],
+                    staging,
+                    maximum_total_size,
+                    chunk_size,
+                    synchronize=True,
                 )
-                sha256, size = self._hash_file(staging, chunk_size)
-                if size != total:
-                    raise ApplicationError(
-                        ErrorCode.EXPORT_FAILED.value,
-                        "export size changed before publication",
-                    )
             if existing is None and not allow_replace:
                 if export_kind == WorkspaceExportKind.DIRECTORY:
                     try:
@@ -150,9 +148,26 @@ class LocalWorkspaceExportStore:
                         ErrorCode.MAX_TOTAL_EXPANDED_SIZE_EXCEEDED.value,
                         "export selection exceeds the configured resource limit",
                 )
-                self._verify_source(entry, chunk_size)
-                archive.write(entry.source_path, arcname=entry.relative_path)
-                self._verify_source(entry, chunk_size)
+                relative = self._safe_relative(entry.relative_path)
+                before = self._regular_stat(entry.source_path)
+                digest = hashlib.sha256()
+                size = 0
+                with entry.source_path.open("rb") as source, archive.open(
+                    relative, mode="w", force_zip64=True
+                ) as output:
+                    while True:
+                        block = source.read(chunk_size)
+                        if not block:
+                            break
+                        size += len(block)
+                        if size > maximum_total_size:
+                            raise ApplicationError(
+                                ErrorCode.MAX_TOTAL_EXPANDED_SIZE_EXCEEDED.value,
+                                "export selection exceeds the configured resource limit",
+                            )
+                        output.write(block)
+                        digest.update(block)
+                self._verify_copied_source(entry, before, size, digest.hexdigest())
         return staging.stat().st_size
 
     def _write_directory(
@@ -181,7 +196,13 @@ class LocalWorkspaceExportStore:
                 )
             output = staging.joinpath(*relative.split("/"))
             output.parent.mkdir(parents=True, exist_ok=True)
-            self._copy_file(entry, output, maximum_total_size, chunk_size)
+            self._copy_file(
+                entry,
+                output,
+                maximum_total_size,
+                chunk_size,
+                synchronize=False,
+            )
             digest.update(relative.encode("utf-8"))
             digest.update(b"\0")
             digest.update(entry.sha256.encode("ascii"))
@@ -197,7 +218,9 @@ class LocalWorkspaceExportStore:
         staging: Path,
         maximum_total_size: int,
         chunk_size: int,
-    ) -> int:
+        *,
+        synchronize: bool,
+    ) -> tuple[int, str]:
         if entry.size > maximum_total_size:
             raise ApplicationError(
                 ErrorCode.MAX_TOTAL_EXPANDED_SIZE_EXCEEDED.value,
@@ -212,26 +235,27 @@ class LocalWorkspaceExportStore:
                 if not block:
                     break
                 size += len(block)
+                if size > maximum_total_size:
+                    raise ApplicationError(
+                        ErrorCode.MAX_TOTAL_EXPANDED_SIZE_EXCEEDED.value,
+                        "export selection exceeds the configured resource limit",
+                    )
                 output.write(block)
                 digest.update(block)
             output.flush()
-            os.fsync(output.fileno())
-        after = self._regular_stat(entry.source_path)
-        if self._fact(before) != self._fact(after):
-            raise ApplicationError(
-                ErrorCode.EXPORT_FAILED.value,
-                "source Working File changed during export",
-            )
-        if size != entry.size or digest.hexdigest() != entry.sha256:
-            raise ApplicationError(
-                ErrorCode.EXPORT_FAILED.value,
-                "source Working File does not match its refreshed fingerprint",
-            )
-        return size
+            if synchronize:
+                os.fsync(output.fileno())
+        sha256 = digest.hexdigest()
+        self._verify_copied_source(entry, before, size, sha256)
+        return size, sha256
 
-    def _verify_source(self, entry: WorkspaceExportEntry, chunk_size: int) -> None:
-        before = self._regular_stat(entry.source_path)
-        sha256, size = self._hash_file(entry.source_path, chunk_size)
+    def _verify_copied_source(
+        self,
+        entry: WorkspaceExportEntry,
+        before,
+        size: int,
+        sha256: str,
+    ) -> None:
         after = self._regular_stat(entry.source_path)
         if (
             self._fact(before) != self._fact(after)
@@ -240,7 +264,7 @@ class LocalWorkspaceExportStore:
         ):
             raise ApplicationError(
                 ErrorCode.EXPORT_FAILED.value,
-                "source Working File does not match its refreshed fingerprint",
+                "export source changed or does not match its expected fingerprint",
             )
 
     @staticmethod

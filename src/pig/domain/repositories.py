@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, Protocol, Sequence
+from typing import Mapping, Optional, Protocol, Sequence
 
 from pig.domain.entities import (
     Artifact,
@@ -200,6 +200,10 @@ class WorkspaceRepository(Protocol):
     def read_record_for_item(
         self, project_id: str, item_id: str
     ) -> Optional[WorkspaceReadRecord]: ...
+
+    def original_artifacts_for_source_nodes(
+        self, source_node_ids: Sequence[str]
+    ) -> Mapping[str, OriginalArtifact]: ...
 
     def search_read_records(
         self,
