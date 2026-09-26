@@ -142,6 +142,42 @@ def test_friendly_working_name_keeps_only_current_and_previous_and_rolls_back(
     assert event_types.count(EventType.WORKING_FILE_ROLLED_BACK) == 2
 
 
+def test_version_capture_falls_back_when_hard_links_are_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "fallback.txt"
+    source.write_bytes(b"baseline")
+    app, project, (item,), _opener = _project(tmp_path, (source,))
+    opened = _open(app, project, item)
+    opened.path.write_bytes(b"changed")
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("hard links are unavailable")
+
+    monkeypatch.setattr(
+        "pig.infrastructure.filesystem.working_version_store.os.link", unavailable
+    )
+    refreshed = app.refresh_working_artifact(
+        RefreshWorkingArtifactRequest(
+            project_id=project.project_id,
+            database_path=project.database_path,
+            workspace_item_id=item.id,
+            actor="tester",
+        )
+    )
+
+    assert refreshed.changed is True
+    database = SqlAlchemyProjectDatabase()
+    with database.unit_of_work(project.database_path) as uow:
+        artifact = uow.workspace.working_artifact_for_item(item.id)
+        revisions = uow.workspace.working_revisions_for_artifact(artifact.id)
+    by_role = {value.role: value for value in revisions}
+    previous = project.database_path.parent.joinpath(
+        *Path(by_role[WorkingRevisionRole.PREVIOUS].storage_key).parts
+    )
+    assert previous.read_bytes() == b"baseline"
+
+
 def test_single_exports_current_bytes_and_multiple_exports_workspace_named_zip(
     tmp_path: Path,
 ) -> None:

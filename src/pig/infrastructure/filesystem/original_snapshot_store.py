@@ -20,6 +20,7 @@ from pig.application.ports import (
     CapturedSnapshot,
     CapturedSnapshotEntry,
     SnapshotInput,
+    SnapshotInputEntry,
 )
 from pig.domain.entities import OriginalArtifact
 from pig.domain.enums import ErrorCode, OriginalSnapshotEntryKind, SourceKind
@@ -212,6 +213,9 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
     ) -> CapturedSnapshot:
         artifact_id = self._validated_generated_id()
         entry_id = self._validated_generated_id()
+        current = self._safe_lstat(source.path)
+        if _is_link_like(current) or not stat.S_ISREG(current.st_mode):
+            self._raise_input_changed(source.path)
         artifact = self._copy_file(
             source.path,
             artifact_id,
@@ -219,6 +223,8 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
             prior_total=prior_session_size,
             control=control,
             current_item=source.display_name,
+            expected_fact=_fact(current),
+            synchronize=True,
         )
         entry = CapturedSnapshotEntry(
             id=entry_id,
@@ -258,21 +264,68 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
         ]
         artifacts: list[CapturedOriginalArtifact] = []
         observed: dict[Path, _PathFact] = {}
-        directory_members: dict[Path, tuple[tuple[str, str], ...]] = {}
+        directory_members: dict[
+            Path, tuple[tuple[str, OriginalSnapshotEntryKind], ...]
+        ] = {}
         root_stat = self._safe_lstat(source.path)
         if _is_link_like(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
             self._raise_input_changed(source.path)
         observed[source.path] = _fact(root_stat)
-        queue = deque([(source.path, root_id)])
+        prepared_by_parent: dict[tuple[str, ...], list[SnapshotInputEntry]] = {}
+        for prepared in source.entries[1:]:
+            prepared_by_parent.setdefault(prepared.relative_parts[:-1], []).append(
+                prepared
+            )
+        queue = deque([(source.path, root_id, ())])
         total_size = 0
         control.advance(count=1, current_item=source.display_name)
 
         while queue:
             control.checkpoint()
-            directory, parent_entry_id = queue.popleft()
-            members = self._scan_directory(directory)
+            directory, parent_entry_id, relative_parent = queue.popleft()
+            members = (
+                self._scan_directory(directory)
+                if not source.entries
+                else [
+                    _Member(
+                        path=source.path.joinpath(*prepared.relative_parts),
+                        name=prepared.relative_parts[-1],
+                        kind=prepared.kind,
+                        fact=_PathFact(0, 0, 0, prepared.size, 0),
+                    )
+                    for prepared in prepared_by_parent.get(relative_parent, ())
+                ]
+            )
+            if source.entries:
+                current_members = []
+                for member in members:
+                    current = self._safe_lstat(member.path)
+                    if _is_link_like(current):
+                        self._raise_input_changed(member.path)
+                    current_kind = (
+                        OriginalSnapshotEntryKind.FOLDER
+                        if stat.S_ISDIR(current.st_mode)
+                        else (
+                            OriginalSnapshotEntryKind.FILE
+                            if stat.S_ISREG(current.st_mode)
+                            else None
+                        )
+                    )
+                    if current_kind != member.kind:
+                        self._raise_input_changed(member.path)
+                    current_members.append(
+                        _Member(
+                            path=member.path,
+                            name=member.name,
+                            kind=member.kind,
+                            fact=_fact(current),
+                        )
+                    )
+                members = current_members
+            for member in members:
+                observed[member.path] = member.fact
             directory_members[directory] = tuple(
-                (member.name, member.kind.value) for member in members
+                (member.name, member.kind) for member in members
             )
             for ordinal, member in enumerate(members):
                 control.checkpoint()
@@ -282,7 +335,6 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
                         message="folder snapshot exceeds the configured entry limit",
                         details={"maximum": policy.max_entry_count},
                     )
-                observed[member.path] = member.fact
                 entry_id = self._validated_generated_id()
                 if member.kind == OriginalSnapshotEntryKind.FOLDER:
                     entries.append(
@@ -296,7 +348,13 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
                             created_at=self._clock(),
                         )
                     )
-                    queue.append((member.path, entry_id))
+                    queue.append(
+                        (
+                            member.path,
+                            entry_id,
+                            relative_parent + (member.name,),
+                        )
+                    )
                     control.advance(count=1, current_item=member.name)
                     continue
                 artifact_id = self._validated_generated_id()
@@ -307,6 +365,8 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
                     prior_total=prior_session_size + total_size,
                     control=control,
                     current_item=member.name,
+                    expected_fact=member.fact,
+                    synchronize=False,
                 )
                 total_size += artifact.size
                 artifacts.append(artifact)
@@ -339,40 +399,47 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
         prior_total: int,
         control: OperationControl,
         current_item: str,
+        expected_fact: _PathFact | None = None,
+        synchronize: bool = True,
     ) -> CapturedOriginalArtifact:
-        before = self._safe_lstat(source)
-        if _is_link_like(before):
+        before = (
+            _fact(self._safe_lstat(source))
+            if expected_fact is None
+            else expected_fact
+        )
+        if stat.S_ISLNK(before.mode):
             raise ApplicationError(
                 code=ErrorCode.SYMLINK_BLOCKED.value,
                 message="symbolic links and reparse points are not imported",
                 details={"path": str(source)},
             )
-        if not stat.S_ISREG(before.st_mode):
+        if not stat.S_ISREG(before.mode):
             raise ApplicationError(
                 code=ErrorCode.UNSUPPORTED_INPUT_TYPE.value,
                 message="snapshot input member is not a regular file",
                 details={"path": str(source)},
             )
-        if before.st_size > policy.max_single_file_size:
+        if before.size > policy.max_single_file_size:
             raise ApplicationError(
                 code=ErrorCode.MAX_SINGLE_FILE_SIZE_EXCEEDED.value,
                 message="input file exceeds the configured single-file limit",
                 details={"path": str(source), "maximum": policy.max_single_file_size},
             )
-        if prior_total + before.st_size > policy.max_total_size:
+        if prior_total + before.size > policy.max_total_size:
             raise ApplicationError(
                 code=ErrorCode.MAX_IMPORT_TOTAL_SIZE_EXCEEDED.value,
                 message="snapshot import exceeds the configured total-size limit",
                 details={"maximum": policy.max_total_size},
             )
         destination = self._artifact_path(artifact_id)
-        destination.parent.mkdir(parents=True)
+        destination.parent.mkdir()
         digest = hashlib.sha256()
         written = 0
+        report_chunks = before.size > policy.io_chunk_size
         try:
             with source.open("rb") as input_stream, destination.open("xb") as output:
                 opened = os.fstat(input_stream.fileno())
-                if _is_link_like(opened) or _fact(opened) != _fact(before):
+                if _is_link_like(opened) or _fact(opened) != before:
                     self._raise_input_changed(source)
                 while True:
                     control.checkpoint()
@@ -393,11 +460,13 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
                         )
                     output.write(chunk)
                     digest.update(chunk)
-                    control.advance(
-                        byte_count=len(chunk), current_item=current_item
-                    )
+                    if report_chunks:
+                        control.advance(
+                            byte_count=len(chunk), current_item=current_item
+                        )
                 output.flush()
-                os.fsync(output.fileno())
+                if synchronize:
+                    os.fsync(output.fileno())
                 after_open = os.fstat(input_stream.fileno())
         except PermissionError as exc:
             destination.unlink(missing_ok=True)
@@ -411,20 +480,24 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
             raise
         after_path = self._safe_lstat(source)
         if (
-            _fact(before) != _fact(after_open)
-            or _fact(before) != _fact(after_path)
-            or written != before.st_size
+            before != _fact(after_open)
+            or before != _fact(after_path)
+            or written != before.size
         ):
             destination.unlink(missing_ok=True)
             self._raise_input_changed(source)
-        control.advance(count=1, current_item=current_item)
+        control.advance(
+            count=1,
+            byte_count=0 if report_chunks else written,
+            current_item=current_item,
+        )
         return CapturedOriginalArtifact(
             id=artifact_id,
             storage_key=self.storage_key(self._snapshot_id, artifact_id),
             size=written,
             sha256=digest.hexdigest(),
             observed_modified_at=datetime.fromtimestamp(
-                before.st_mtime, timezone.utc
+                before.modified_ns / 1_000_000_000, timezone.utc
             ),
         )
 
@@ -469,7 +542,9 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
     def _verify_folder_unchanged(
         self,
         observed: dict[Path, _PathFact],
-        directory_members: dict[Path, tuple[tuple[str, str], ...]],
+        directory_members: dict[
+            Path, tuple[tuple[str, OriginalSnapshotEntryKind], ...]
+        ],
     ) -> None:
         for path, expected in observed.items():
             try:
@@ -479,12 +554,39 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
             if _is_link_like(current) or _fact(current) != expected:
                 self._raise_input_changed(path)
         for directory, expected in directory_members.items():
-            actual = tuple(
-                (member.name, member.kind.value)
-                for member in self._scan_directory(directory)
-            )
+            actual = self._scan_directory_membership(directory)
             if actual != expected:
                 self._raise_input_changed(directory)
+
+    @staticmethod
+    def _scan_directory_membership(
+        directory: Path,
+    ) -> tuple[tuple[str, OriginalSnapshotEntryKind], ...]:
+        try:
+            with os.scandir(directory) as iterator:
+                values = sorted(iterator, key=lambda entry: entry.name)
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            raise ApplicationError(
+                code=ErrorCode.INPUT_CHANGED_DURING_COPY.value,
+                message="snapshot folder membership could not be verified",
+                details={"path": str(directory)},
+            ) from exc
+        result = []
+        for value in values:
+            if value.is_symlink():
+                LocalOriginalSnapshotWriteSession._raise_input_changed(
+                    Path(value.path)
+                )
+            if value.is_dir(follow_symlinks=False):
+                kind = OriginalSnapshotEntryKind.FOLDER
+            elif value.is_file(follow_symlinks=False):
+                kind = OriginalSnapshotEntryKind.FILE
+            else:
+                LocalOriginalSnapshotWriteSession._raise_input_changed(
+                    Path(value.path)
+                )
+            result.append((value.name, kind))
+        return tuple(result)
 
     def _artifact_path(self, artifact_id: str) -> Path:
         return self._staging_root / "objects" / artifact_id / "content"
@@ -504,6 +606,7 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
             )
         self._ensure_controlled_parent(self._staging_root.parent)
         self._staging_root.mkdir()
+        (self._staging_root / "objects").mkdir()
 
     def _ensure_controlled_parent(self, target: Path) -> None:
         relative = target.relative_to(self._project_path)
@@ -676,10 +779,16 @@ class LocalOriginalSnapshotStore:
             self._validate_preflight_size(
                 candidate, total_size, total_size, policy
             )
+            entries = (
+                self._input_entry((), OriginalSnapshotEntryKind.FILE, stat_result),
+            )
         elif stat.S_ISDIR(stat_result.st_mode):
             kind = SourceKind.FOLDER
-            entry_count, total_size = self._measure_folder(
-                resolved, policy=policy, control=operation
+            entry_count, total_size, entries = self._measure_folder(
+                resolved,
+                root_stat=stat_result,
+                policy=policy,
+                control=operation,
             )
         else:
             raise ApplicationError(
@@ -704,6 +813,7 @@ class LocalOriginalSnapshotStore:
             display_name=display_name,
             entry_count=entry_count,
             total_size=total_size,
+            entries=entries,
         )
 
     @staticmethod
@@ -714,11 +824,15 @@ class LocalOriginalSnapshotStore:
         self,
         root: Path,
         *,
+        root_stat: os.stat_result,
         policy: SnapshotImportPolicy,
         control: OperationControl,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, tuple[SnapshotInputEntry, ...]]:
         entry_count = 1
         total_size = 0
+        entries = [
+            self._input_entry((), OriginalSnapshotEntryKind.FOLDER, root_stat)
+        ]
         queue = deque([root])
         while queue:
             control.checkpoint()
@@ -734,15 +848,35 @@ class LocalOriginalSnapshotStore:
                     )
                 if member.kind == OriginalSnapshotEntryKind.FOLDER:
                     queue.append(member.path)
-                    continue
-                self._validate_preflight_size(
-                    member.path,
-                    member.fact.size,
-                    total_size + member.fact.size,
-                    policy,
+                else:
+                    self._validate_preflight_size(
+                        member.path,
+                        member.fact.size,
+                        total_size + member.fact.size,
+                        policy,
+                    )
+                    total_size += member.fact.size
+                entries.append(
+                    SnapshotInputEntry(
+                        relative_parts=member.path.relative_to(root).parts,
+                        kind=member.kind,
+                        size=member.fact.size,
+                    )
                 )
-                total_size += member.fact.size
-        return entry_count, total_size
+        return entry_count, total_size, tuple(entries)
+
+    @staticmethod
+    def _input_entry(
+        relative_parts: tuple[str, ...],
+        kind: OriginalSnapshotEntryKind,
+        stat_result: os.stat_result,
+    ) -> SnapshotInputEntry:
+        fact = _fact(stat_result)
+        return SnapshotInputEntry(
+            relative_parts=relative_parts,
+            kind=kind,
+            size=fact.size,
+        )
 
     def _scan_members_for_preflight(self, directory: Path) -> list[_Member]:
         try:
@@ -757,7 +891,20 @@ class LocalOriginalSnapshotStore:
         members: list[_Member] = []
         for value in values:
             path = Path(value.path)
-            current = LocalOriginalSnapshotWriteSession._safe_lstat(path)
+            try:
+                current = value.stat(follow_symlinks=False)
+            except FileNotFoundError as exc:
+                raise ApplicationError(
+                    code=ErrorCode.INPUT_NOT_FOUND.value,
+                    message="snapshot input disappeared during preflight",
+                    details={"path": str(path)},
+                ) from exc
+            except (PermissionError, OSError) as exc:
+                raise ApplicationError(
+                    code=ErrorCode.INPUT_UNREADABLE.value,
+                    message="snapshot input could not be inspected during preflight",
+                    details={"path": str(path)},
+                ) from exc
             if _is_link_like(current):
                 raise ApplicationError(
                     code=ErrorCode.SYMLINK_BLOCKED.value,

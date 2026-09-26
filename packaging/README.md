@@ -64,6 +64,17 @@ import, structure tree, Working materialization/edit, structure-preserving
 export, recovery, and reopen. They do not replace clean-VM or manual GUI
 acceptance.
 
+Windows Qt 使用系统 ICU Shim。构建环境的 `PATH` 可能暴露 Poppler 等工具自带的
+版本化 ICU；`PIG.spec` 会排除误收集的 `icuuc.dll` 与 `icudt*.dll`，避免它们遮蔽
+系统 ICU 并导致 `PySide6.QtCore` 启动失败。Package Smoke 必须在未手工修改生成目录
+的情况下通过。
+
+Windows Qt uses the operating-system ICU shim. A build environment `PATH` may
+expose a versioned ICU distribution from tools such as Poppler. `PIG.spec`
+excludes accidentally collected `icuuc.dll` and `icudt*.dll` files so they
+cannot shadow system ICU and break `PySide6.QtCore` startup. Package smoke must
+pass without manually modifying the generated distribution.
+
 ## 发布门 / Release gates
 
 必须使用 `release/WORKBENCH-W9-RELEASE-CHECKLIST.md`。在人工许可证复核、代码签名、

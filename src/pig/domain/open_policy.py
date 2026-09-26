@@ -30,7 +30,7 @@ class OpenPolicy:
     allowed_formats: frozenset[NodeFormat] = field(
         default_factory=lambda: DEFAULT_OPEN_FORMATS
     )
-    verification_chunk_size: int = 1024 * 1024
+    verification_chunk_size: int = 4 * 1024 * 1024
     maximum_working_file_size: int = 2 * 1024 * 1024 * 1024
     stability_retries: int = 1
 

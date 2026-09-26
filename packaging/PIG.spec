@@ -33,6 +33,21 @@ a = Analysis(
     noarchive=False,
     optimize=1,
 )
+
+# Qt 6 on Windows links against the operating-system ICU shim. A developer
+# PATH may also expose a version-suffixed ICU distribution (for example from
+# Poppler); PyInstaller can otherwise collect it as an unversioned icuuc.dll.
+# That DLL shadows the Windows shim and makes QtCore fail with ERROR_PROC_NOT_FOUND.
+_blocked_icu_binaries = {"icuuc.dll"}
+a.binaries = [
+    entry
+    for entry in a.binaries
+    if Path(entry[0]).name.lower() not in _blocked_icu_binaries
+    and not (
+        Path(entry[0]).name.lower().startswith("icudt")
+        and Path(entry[0]).suffix.lower() == ".dll"
+    )
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(

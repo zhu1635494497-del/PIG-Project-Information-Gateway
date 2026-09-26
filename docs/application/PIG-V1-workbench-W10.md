@@ -1,6 +1,6 @@
 # PIG V1 Workbench W10 性能与响应性稳定 / Performance and Responsiveness Stabilization
 
-- 状态：已批准；W10.1–W10.4 已完成，W10.5 待进入 / Status: Approved; W10.1-W10.4 complete, W10.5 pending entry
+- 状态：W10.1–W10.4 已完成；W10.5 自动资格 Gate 已通过，等待人工桌面验收 / Status: W10.1-W10.4 complete; W10.5 automated qualification gates pass, pending manual desktop acceptance
 - 日期：2026-09-25 / Date: 2026-09-25
 - 决策：`ADR-022`，D92-A 至 D99-A / Decisions: `ADR-022`, D92-A through D99-A
 - 分支：`v1优化` / Branch: `v1优化`
@@ -327,6 +327,76 @@ not stop responding because it constructs every widget eagerly.
   验收通过后才可建立 `v1.0.0-rc.2`。 / All W10 targets pass,
   later runs stay within the 25% regression gate, and `v1.0.0-rc.2` is created
   only after manual desktop acceptance.
+
+### W10.5 实施与资格证据 / W10.5 Implementation and Qualification Evidence
+
+- 正式基准工具现在执行固定 Fixture、三轮中位数、Peak RSS、SQLite 最大尺寸、首次
+  Progress、绝对 Gate、RC.1 对比和 Query Plan 证据。基准证据保存于
+  `release/performance-baseline-v1.0.0-rc.2.json`。 / The formal benchmark now
+  executes fixed fixtures, three-run medians, Peak RSS, maximum SQLite size,
+  first progress, absolute gates, the RC.1 comparison, and query-plan evidence.
+  The benchmark evidence is stored in
+  `release/performance-baseline-v1.0.0-rc.2.json`.
+- Snapshot Folder Capture 复用 Preflight 产生的一次性 typed Plan，复制时仍逐项重新
+  检查类型和稳定性，完成后重新核对目录成员；大量小文件不再重复遍历目录或对每个
+  可从外部输入恢复的 Staging 文件单独 `fsync`。原子发布、SHA-256、资源限制、
+  Link 拒绝和输入变化检测保持有效。 / Snapshot Folder Capture reuses the
+  one-use typed plan produced by preflight, rechecks type and stability for each
+  copied member, and verifies final directory membership. Large small-file sets
+  no longer repeat directory discovery or individually `fsync` every staging
+  file that remains recoverable from the external input. Atomic publication,
+  SHA-256, resource limits, link rejection, and input-change detection remain
+  enforced.
+- Working 版本旋转对不可变 Current Checkpoint 优先使用同卷硬链接，随后完整重算
+  SHA-256 并验证文件身份；不支持硬链接时自动回退到原有 Copy+SHA 路径。可编辑
+  Working 文件从不与版本文件共享硬链接。Processing 与 Open/Refresh 的默认有界
+  I/O 块调整为 `4 MiB`，不减少 Hash 或稳定性检查。 / Working-version rotation
+  prefers a same-volume hard link for the immutable current checkpoint and then
+  fully recomputes SHA-256 and verifies file identity. Filesystems without hard
+  links automatically fall back to the original copy-plus-hash path. The
+  editable Working file never shares a hard link with a version file. Default
+  bounded I/O blocks for Processing and Open/Refresh are now `4 MiB`, without
+  removing hash or stability checks.
+- PyInstaller 规范排除由开发机 `PATH` 误带入的版本化 ICU DLL，防止其遮蔽 Windows
+  系统 ICU 并导致 `PySide6.QtCore` 启动失败。最终资格包的 ICU 冲突检查、Runtime
+  Smoke 和 Packaged Flow 均通过。 / The PyInstaller specification excludes
+  versioned ICU DLLs accidentally exposed by the developer `PATH`, preventing
+  them from shadowing Windows system ICU and breaking `PySide6.QtCore` startup.
+  The final qualification package passed the ICU collision check, runtime smoke,
+  and packaged flow.
+
+| 指标 / Metric | 三轮中位数 / Three-run median | Gate / Result |
+| --- | ---: | --- |
+| 10,000 Workspace Tree | `0.895s` | `≤1.5s`，通过 / pass |
+| 10,000 Workspace Search | `0.225s` | `≤0.75s`，通过 / pass |
+| 2,000-file Snapshot | `5.245s` | `≤8.5s`，通过 / pass |
+| 10,000-entry ZIP Inspect | `18.472s` | `≤35s`，通过 / pass |
+| 64 MiB Materialize | `0.881s` | RC.1 25% 相对门通过 / RC.1 25% relative gate passed |
+| 64 MiB Refresh | `0.811s` | RC.1 25% 相对门通过 / RC.1 25% relative gate passed |
+| 500-file Folder Export | `2.566s` | `≤25s`，通过 / pass |
+| 500-file ZIP Export | `2.419s` | `≤13s`，通过 / pass |
+| 80 MiB Single-file Add | `0.960s`；首次 Progress `0.031s` | Progress Gate 通过 / pass |
+| 2,000-file / 78.125 MiB Add | `45.910s`；首次 Progress `0.029s` | Progress Gate 通过；记录吞吐 / pass; throughput recorded |
+
+- 最大 Peak RSS 为约 `214.1 MiB`，低于 `300 MiB`；SQLite 最大尺寸为
+  `87,863,296` bytes。所有绝对 Gate 与 RC.1 25% 相对门均通过。 / Maximum Peak RSS is about
+  `214.1 MiB`, below `300 MiB`; maximum SQLite size is `87,863,296` bytes. All
+  absolute and RC.1 comparison gates pass.
+- Query Plan 使用现有 `ix_workspace_items_origin`、
+  `ix_processing_events_project_time` 及相关唯一索引；没有证据支持 `0009`，因此不创建
+  Migration。 / Query plans use the existing `ix_workspace_items_origin`,
+  `ix_processing_events_project_time`, and related unique indexes. No evidence
+  justifies `0009`, so no migration is created.
+- 最终全量回归为 `172 passed, 95 skipped`，另有一个预期 Duplicate ZIP Warning；
+  Migration Head 为 `0008_workbench_recovery`，专项 Migration 测试 `4 passed`。 /
+  Final full regression is `172 passed, 95 skipped`, with one expected duplicate-
+  ZIP warning. Migration head is `0008_workbench_recovery`, and the focused
+  migration suite reports `4 passed`.
+- W10.5 自动性能、Migration、测试与 Package Gate 已通过；源码与最终打包桌面人工验收
+  尚未执行。版本保持 `1.0.0rc1`，人工验收前不得创建 `v1.0.0-rc.2` Tag 或 Release。 /
+  W10.5 automated performance, migration, test, and package gates pass; source
+  and final-package manual desktop acceptance have not run. Version remains
+  `1.0.0rc1`; no `v1.0.0-rc.2` tag or release may be created.
 
 ## 实施顺序 / Implementation Order
 

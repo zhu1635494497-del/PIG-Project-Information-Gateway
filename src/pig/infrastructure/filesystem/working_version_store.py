@@ -126,7 +126,7 @@ class LocalWorkingVersionStore:
         published = False
         try:
             manifest.update("WRITING")
-            previous = self._copy_verified(
+            previous = self._link_or_copy_verified(
                 checkpoint,
                 staging_root / "previous",
                 storage_key=previous_key,
@@ -160,6 +160,112 @@ class LocalWorkingVersionStore:
             raise
         finally:
             self._cleanup(staging_root, project / ".staging")
+
+    def _link_or_copy_verified(
+        self,
+        source: Path,
+        destination: Path,
+        *,
+        storage_key: str,
+        expected_size: int,
+        expected_sha256: str,
+        maximum: int,
+        chunk_size: int,
+        stability_retries: int,
+    ) -> StoredWorkingVersion:
+        """Reuse immutable checkpoint bytes when the project volume supports links."""
+
+        for attempt in range(stability_retries + 1):
+            destination.unlink(missing_ok=True)
+            try:
+                before = source.lstat()
+            except FileNotFoundError as exc:
+                raise ApplicationError(
+                    ErrorCode.WORKING_VERSION_INTEGRITY_FAILED.value,
+                    "working version source is missing",
+                ) from exc
+            if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+                raise ApplicationError(
+                    ErrorCode.WORKING_VERSION_INTEGRITY_FAILED.value,
+                    "working version source is not a regular non-link file",
+                )
+            if before.st_size > maximum:
+                raise ApplicationError(
+                    ErrorCode.MAX_SINGLE_FILE_SIZE_EXCEEDED.value,
+                    "working version exceeds the configured resource limit",
+                )
+            try:
+                os.link(source, destination, follow_symlinks=False)
+            except (NotImplementedError, OSError):
+                destination.unlink(missing_ok=True)
+                return self._copy_verified(
+                    source,
+                    destination,
+                    storage_key=storage_key,
+                    expected_size=expected_size,
+                    expected_sha256=expected_sha256,
+                    maximum=maximum,
+                    chunk_size=chunk_size,
+                    stability_retries=stability_retries,
+                )
+            try:
+                linked = destination.lstat()
+                digest = hashlib.sha256()
+                size = 0
+                with destination.open("rb") as reader:
+                    while True:
+                        block = reader.read(chunk_size)
+                        if not block:
+                            break
+                        size += len(block)
+                        if size > maximum:
+                            raise ApplicationError(
+                                ErrorCode.MAX_SINGLE_FILE_SIZE_EXCEEDED.value,
+                                "working version exceeds the configured resource limit",
+                            )
+                        digest.update(block)
+                after = source.lstat()
+                linked_after = destination.lstat()
+            except FileNotFoundError as exc:
+                destination.unlink(missing_ok=True)
+                if attempt < stability_retries:
+                    continue
+                raise ApplicationError(
+                    ErrorCode.WORKING_VERSION_INTEGRITY_FAILED.value,
+                    "linked working version disappeared during verification",
+                ) from exc
+            stable = self._same_file_state(before, after) and self._same_file_state(
+                linked, linked_after
+            )
+            same_file = (before.st_dev, before.st_ino) == (
+                linked.st_dev,
+                linked.st_ino,
+            )
+            sha256 = digest.hexdigest()
+            if not stable or not same_file:
+                destination.unlink(missing_ok=True)
+                if attempt < stability_retries:
+                    continue
+                raise ApplicationError(
+                    ErrorCode.WORKING_VERSION_INTEGRITY_FAILED.value,
+                    "linked working version changed while it was being verified",
+                )
+            if size != expected_size or sha256 != expected_sha256:
+                destination.unlink(missing_ok=True)
+                raise ApplicationError(
+                    ErrorCode.WORKING_VERSION_INTEGRITY_FAILED.value,
+                    "working version fingerprint does not match the expected state",
+                )
+            return StoredWorkingVersion(
+                storage_key=storage_key,
+                path=destination,
+                size=size,
+                sha256=sha256,
+                file_modified_at=datetime.fromtimestamp(
+                    before.st_mtime, tz=timezone.utc
+                ),
+            )
+        raise AssertionError("version link verification loop did not return")
 
     def rollback(
         self,
@@ -302,17 +408,7 @@ class LocalWorkingVersionStore:
                     ErrorCode.WORKING_VERSION_INTEGRITY_FAILED.value,
                     "working version source is missing",
                 ) from exc
-            stable = (
-                before.st_dev,
-                before.st_ino,
-                before.st_size,
-                before.st_mtime_ns,
-            ) == (
-                after.st_dev,
-                after.st_ino,
-                after.st_size,
-                after.st_mtime_ns,
-            )
+            stable = self._same_file_state(before, after)
             sha256 = digest.hexdigest()
             if not stable:
                 if attempt < stability_retries:
@@ -336,6 +432,20 @@ class LocalWorkingVersionStore:
                 ),
             )
         raise AssertionError("version copy loop did not return")
+
+    @staticmethod
+    def _same_file_state(before: os.stat_result, after: os.stat_result) -> bool:
+        return (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) == (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        )
 
     @staticmethod
     def _version_key(artifact_id: str, name: str) -> str:

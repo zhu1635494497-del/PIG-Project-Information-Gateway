@@ -25,6 +25,7 @@ from pig.infrastructure.database.provider import SqlAlchemyProjectDatabase
 from pig.infrastructure.database.engine import create_project_engine
 from pig.infrastructure.filesystem.original_snapshot_store import (
     LocalOriginalSnapshotStore,
+    LocalOriginalSnapshotWriteSession,
 )
 
 
@@ -289,6 +290,18 @@ class _FailingStore(LocalOriginalSnapshotStore):
         return _FailingWrite(self._code)
 
 
+class _MutatingFolderAfterPreflightStore(LocalOriginalSnapshotStore):
+    def __init__(self, source: Path) -> None:
+        super().__init__()
+        self._source = source
+
+    def begin(self, project_path, import_session_id, snapshot_id):
+        (self._source / "added-after-preflight.txt").write_text(
+            "changed", encoding="utf-8"
+        )
+        return super().begin(project_path, import_session_id, snapshot_id)
+
+
 def test_interrupted_capture_persists_interrupted_item_snapshot_and_session(
     tmp_path,
 ) -> None:
@@ -343,6 +356,67 @@ def test_capture_fault_is_persisted_and_does_not_publish_originals(
 
     assert result.session_status == ImportSessionStatus.FAILED
     assert result.items[0].error_code == code
+    assert not (project.workspace_path / "originals").exists()
+
+
+def test_reused_preflight_plan_still_rejects_folder_membership_change(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "changing-folder"
+    source.mkdir()
+    (source / "existing.txt").write_text("existing", encoding="utf-8")
+    application, project = _project(tmp_path)
+    application._snapshot_import_service._store = (
+        _MutatingFolderAfterPreflightStore(source)
+    )
+
+    result = application.import_project_items(
+        ImportProjectItemsRequest(
+            project_id=project.project_id,
+            database_path=project.database_path,
+            input_paths=(source,),
+            actor="tester",
+            idempotency_key="membership-changed-after-preflight",
+        )
+    )
+
+    assert result.session_status == ImportSessionStatus.FAILED
+    assert result.items[0].error_code == "INPUT_CHANGED_DURING_COPY"
+    assert not (project.workspace_path / "originals").exists()
+
+
+def test_folder_capture_rejects_file_changed_after_its_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "changing-content"
+    source.mkdir()
+    first = source / "a-first.txt"
+    first.write_bytes(b"before")
+    (source / "b-second.txt").write_bytes(b"second")
+    application, project = _project(tmp_path)
+    original_copy = LocalOriginalSnapshotWriteSession._copy_file
+
+    def copy_then_mutate(self, input_path, *args, **kwargs):
+        captured = original_copy(self, input_path, *args, **kwargs)
+        if input_path == first:
+            first.write_bytes(b"changed-after-copy")
+        return captured
+
+    monkeypatch.setattr(
+        LocalOriginalSnapshotWriteSession, "_copy_file", copy_then_mutate
+    )
+    result = application.import_project_items(
+        ImportProjectItemsRequest(
+            project_id=project.project_id,
+            database_path=project.database_path,
+            input_paths=(source,),
+            actor="tester",
+            idempotency_key="content-changed-after-copy",
+        )
+    )
+
+    assert result.session_status == ImportSessionStatus.FAILED
+    assert result.items[0].error_code == "INPUT_CHANGED_DURING_COPY"
     assert not (project.workspace_path / "originals").exists()
 
 

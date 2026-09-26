@@ -63,6 +63,13 @@ class WorkspaceManager(Protocol):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class SnapshotInputEntry:
+    relative_parts: tuple[str, ...]
+    kind: OriginalSnapshotEntryKind
+    size: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SnapshotInput:
     path: Path
     locator: str
@@ -70,6 +77,7 @@ class SnapshotInput:
     display_name: str
     entry_count: int
     total_size: int
+    entries: Sequence[SnapshotInputEntry] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

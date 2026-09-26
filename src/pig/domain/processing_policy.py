@@ -13,7 +13,7 @@ class ProcessingPolicy:
     max_single_file_size: int = 2 * 1024 * 1024 * 1024
     max_total_expanded_size: int = 20 * 1024 * 1024 * 1024
     max_compression_ratio: float = 200.0
-    io_chunk_size: int = 1024 * 1024
+    io_chunk_size: int = 4 * 1024 * 1024
     max_external_listing_size: int = 64 * 1024 * 1024
     external_process_timeout_seconds: float = 120.0
     minimum_free_space_bytes: int = 256 * 1024 * 1024
