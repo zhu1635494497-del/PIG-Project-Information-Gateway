@@ -1,6 +1,6 @@
 # PIG V1 Workbench W10 性能与响应性稳定 / Performance and Responsiveness Stabilization
 
-- 状态：已批准；W10.1–W10.3 已完成，W10.4 待进入 / Status: Approved; W10.1-W10.3 complete, W10.4 pending entry
+- 状态：已批准；W10.1–W10.4 已完成，W10.5 待进入 / Status: Approved; W10.1-W10.4 complete, W10.5 pending entry
 - 日期：2026-09-25 / Date: 2026-09-25
 - 决策：`ADR-022`，D92-A 至 D99-A / Decisions: `ADR-022`, D92-A through D99-A
 - 分支：`v1优化` / Branch: `v1优化`
@@ -251,6 +251,60 @@ not stop responding because it constructs every widget eagerly.
   Cancel 在下一安全点生效且项目可重开。 / Stage feedback appears within
   500 ms after a drop; the window remains movable/repaintable; cancellation
   takes effect at the next safe checkpoint and the Project reopens cleanly.
+
+### W10.4 实施证据 / W10.4 Implementation Evidence
+
+- 完成日期：2026-09-26。 / Completed: 2026-09-26.
+- 新增进程内 typed Operation Control，统一提供 Stage、Count、Bytes、Current Item、
+  Warning、Cancellable 与 Cancellation Requested；Progress 只存在于当前 Action，
+  不增加业务表或持久任务实体。 / Added an in-process typed Operation Control that
+  exposes stage, count, bytes, current item, warning, cancellability, and
+  cancellation-requested state. Progress exists only for the current action and
+  adds no business table or persistent-task entity.
+- Import、Structure Inspection 与 Export 在文件、Container、批次和数据块边界检查
+  Cancellation Token；进入原子发布或数据库提交后切换为不可取消，让当前原子步骤
+  安全完成。 / Import, structure inspection, and export check the cancellation
+  token at file, Container, batch, and data-block boundaries. Once atomic
+  publication or database commit begins, the action becomes non-cancellable so
+  that the current atomic step finishes safely.
+- Import 预检在创建 Session/Snapshot 前计算条目数、总字节、单文件限制和 Project
+  磁盘余量；Export 在创建暂存输出前检查目标卷磁盘余量。超限拒绝和取消结果进入
+  既有结构化 Event，精确失败原因保存在 Event Details；未新增 Migration。 /
+  Import preflight computes entry count, total bytes, per-file limits, and
+  Project free space before creating a Session/Snapshot. Export checks target
+  volume free space before staging output. Limit rejections and cancellations
+  use existing structured Events, with the exact failure reason in Event
+  Details; no migration was added.
+- Desktop 保持单后台 Action Busy Policy，并新增确定/不确定 Progress、当前项目提示和
+  Cancel 按钮；自动 UI 测试确认首次阶段反馈低于 `500 ms`，取消期间事件循环仍可处理
+  重绘与输入。 / The desktop retains the single-background-action busy policy
+  and adds determinate/indeterminate progress, current-item text, and a Cancel
+  button. Automated UI tests confirm initial stage feedback below `500 ms` and
+  a responsive event loop while cancellation is pending.
+- 故障注入覆盖 Snapshot Copy 取消、Structure Planning 取消、Export Write 取消、磁盘
+  不足和 Atomic Publish 期间延迟取消；验证 `INTERRUPTED` 状态、暂存清理、无半棵
+  Workspace Tree、完成中的原子发布和 Project 重开。 / Fault injection covers
+  cancellation during Snapshot copy, structure planning, and export write,
+  insufficient disk, and deferred cancellation during atomic publication. It
+  verifies `INTERRUPTED` state, staging cleanup, absence of partial Workspace
+  trees, completion of in-flight atomic publication, and clean Project reopen.
+- 当前参考主机单轮代表性实测：80 MiB 单文件完整导入与建树 `0.928s`，首次 Progress
+  `0.083s`；2,000 文件、78.125 MiB 文件夹完整导入与建树 `48.394s`，首次 Progress
+  `0.028s`，Peak RSS `128,819,200` bytes（约 `122.9 MiB`）。后者证明交互反馈和内存
+  边界达标，但端到端多文件吞吐仍作为 W10.5 的明确收口观察项，不宣称为跨设备
+  SLA。 / One-run representative measurements on the reference host: complete
+  import and tree construction for one 80 MiB file took `0.928s`, with first
+  progress at `0.083s`; a 2,000-file, 78.125 MiB folder took `48.394s`, with
+  first progress at `0.028s` and Peak RSS of `128,819,200` bytes (about
+  `122.9 MiB`). The latter demonstrates acceptable interaction feedback and
+  memory bounds, while end-to-end many-file throughput remains an explicit
+  W10.5 closure observation rather than a cross-device SLA claim.
+- 全量回归：`167 passed, 95 skipped`，另有一个预期 Duplicate ZIP Warning。 /
+  Full regression: `167 passed, 95 skipped`, with one expected duplicate-ZIP
+  warning.
+- 本阶段不增加 Tool、Workflow、Automation、AI、分布式 Worker、持久 Pause/Resume 或
+  新 UI 页面。 / This phase adds no Tool, Workflow, Automation, AI,
+  distributed worker, persistent pause/resume, or new UI page.
 
 ## W10.5：Qualification 与 RC.2 / Qualification and RC.2
 

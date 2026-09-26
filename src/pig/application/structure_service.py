@@ -14,6 +14,12 @@ from pig.application.contracts import (
     MaterializeWorkspaceItemResult,
 )
 from pig.application.errors import ApplicationError
+from pig.application.operation_control import (
+    OperationCancelled,
+    OperationControl,
+    OperationStage,
+    ensure_operation_control,
+)
 from pig.application.ports import (
     InspectionCacheStore,
     OriginalSnapshotStore,
@@ -169,8 +175,12 @@ class WorkbenchStructureService:
         self._new_id = id_generator
 
     def inspect(
-        self, request: InspectImportSessionRequest
+        self,
+        request: InspectImportSessionRequest,
+        *,
+        control: OperationControl | None = None,
     ) -> InspectImportSessionResult:
+        operation = ensure_operation_control(control)
         project_id = self._required(request.project_id, "project_id")
         actor = self._required(request.actor, "actor")
         database_path = self._absolute(request.database_path)
@@ -256,68 +266,94 @@ class WorkbenchStructureService:
 
         plans: list[_SourcePlan] = []
         planned_new_nodes = 0
-        with self._inspection_cache.begin(project_path, operation_id) as cache:
-            for item in captured:
-                with self._database.unit_of_work(database_path) as uow:
-                    snapshot = uow.imports.get_snapshot(item.snapshot_id)
-                    source = uow.catalog.source_for_snapshot(item.snapshot_id)
-                    entries = tuple(uow.imports.entries_for_snapshot(item.snapshot_id))
-                    artifacts = tuple(
-                        uow.imports.original_artifacts_for_snapshot(item.snapshot_id)
+        operation.start_stage(
+            OperationStage.STRUCTURE_INSPECTION,
+            total_count=len(captured),
+            current_item=(None if not captured else Path(captured[0].input_locator).name),
+        )
+        try:
+            with self._inspection_cache.begin(project_path, operation_id) as cache:
+                for item in captured:
+                    operation.checkpoint()
+                    operation.update(current_item=Path(item.input_locator).name)
+                    with self._database.unit_of_work(database_path) as uow:
+                        snapshot = uow.imports.get_snapshot(item.snapshot_id)
+                        source = uow.catalog.source_for_snapshot(item.snapshot_id)
+                        entries = tuple(uow.imports.entries_for_snapshot(item.snapshot_id))
+                        artifacts = tuple(
+                            uow.imports.original_artifacts_for_snapshot(item.snapshot_id)
+                        )
+                        root = (
+                            None
+                            if source is None or source.root_node_id is None
+                            else uow.catalog.get_node(source.root_node_id)
+                        )
+                    if (
+                        snapshot is None
+                        or snapshot.status != OriginalSnapshotStatus.READY
+                        or source is None
+                        or root is None
+                    ):
+                        operation.advance(count=1)
+                        continue
+                    try:
+                        plan = self._plan_source(
+                            project_path=project_path,
+                            source=source,
+                            root=root,
+                            entries=entries,
+                            artifacts=artifacts,
+                            root_ordinal=item.ordinal,
+                            cache=cache,
+                            policy=request.policy,
+                            control=operation,
+                        )
+                    except HandlerOutcomeError as exc:
+                        root.status = exc.status
+                        plan = _SourcePlan(
+                            source=source,
+                            root_ordinal=item.ordinal,
+                            nodes=[
+                                _PlannedNode(
+                                    node=root,
+                                    parent_node_id=None,
+                                    relationship_id=None,
+                                    relationship_type=None,
+                                    relationship_ordinal=item.ordinal,
+                                    error_code=exc.code,
+                                    error_category=exc.category,
+                                    error_message=exc.message,
+                                    error_retryable=exc.retryable,
+                                )
+                            ],
+                        )
+                    additional = max(0, len(plan.nodes) - 1)
+                    if (
+                        existing_node_count + planned_new_nodes + additional
+                        > request.policy.max_node_count
+                    ):
+                        plan.nodes[0].node.status = NodeProcessingStatus.LIMIT_EXCEEDED
+                        plan.nodes[0].error_code = ErrorCode.MAX_NODE_COUNT_EXCEEDED
+                        plan.nodes = [plan.nodes[0]]
+                        additional = 0
+                    planned_new_nodes += additional
+                    plans.append(plan)
+                    operation.advance(count=1)
+        except OperationCancelled:
+            with self._database.unit_of_work(database_path) as uow:
+                session = uow.imports.get_session(request.import_session_id)
+                project = self._project(uow, project_id, database_path)
+                if session is not None and session.status == ImportSessionStatus.INSPECTING:
+                    self._interrupt_pending_add(
+                        uow,
+                        session,
+                        project,
+                        actor=actor,
+                        correlation_id=operation_id,
+                        reason="user_cancelled",
                     )
-                    root = (
-                        None
-                        if source is None or source.root_node_id is None
-                        else uow.catalog.get_node(source.root_node_id)
-                    )
-                if (
-                    snapshot is None
-                    or snapshot.status != OriginalSnapshotStatus.READY
-                    or source is None
-                    or root is None
-                ):
-                    continue
-                try:
-                    plan = self._plan_source(
-                        project_path=project_path,
-                        source=source,
-                        root=root,
-                        entries=entries,
-                        artifacts=artifacts,
-                        root_ordinal=item.ordinal,
-                        cache=cache,
-                        policy=request.policy,
-                    )
-                except HandlerOutcomeError as exc:
-                    root.status = exc.status
-                    plan = _SourcePlan(
-                        source=source,
-                        root_ordinal=item.ordinal,
-                        nodes=[
-                            _PlannedNode(
-                                node=root,
-                                parent_node_id=None,
-                                relationship_id=None,
-                                relationship_type=None,
-                                relationship_ordinal=item.ordinal,
-                                error_code=exc.code,
-                                error_category=exc.category,
-                                error_message=exc.message,
-                                error_retryable=exc.retryable,
-                            )
-                        ],
-                    )
-                additional = max(0, len(plan.nodes) - 1)
-                if (
-                    existing_node_count + planned_new_nodes + additional
-                    > request.policy.max_node_count
-                ):
-                    plan.nodes[0].node.status = NodeProcessingStatus.LIMIT_EXCEEDED
-                    plan.nodes[0].error_code = ErrorCode.MAX_NODE_COUNT_EXCEEDED
-                    plan.nodes = [plan.nodes[0]]
-                    additional = 0
-                planned_new_nodes += additional
-                plans.append(plan)
+                    uow.commit()
+            raise
 
         all_nodes = [planned for plan in plans for planned in plan.nodes]
         warning_count = sum(
@@ -347,6 +383,8 @@ class WorkbenchStructureService:
         correlation_id = operation_id
         now = self._clock()
         workspace_count = 0
+        operation.checkpoint()
+        operation.update(cancellable=False)
         with self._database.unit_of_work(database_path) as uow:
             session = uow.imports.get_session(request.import_session_id)
             if session is None or session.status != ImportSessionStatus.INSPECTING:
@@ -722,6 +760,8 @@ class WorkbenchStructureService:
             )
             uow.commit()
 
+        operation.update(cancellable=True)
+
         return InspectImportSessionResult(
             project_id=project_id,
             import_session_id=request.import_session_id,
@@ -1054,7 +1094,9 @@ class WorkbenchStructureService:
         root_ordinal: int,
         cache,
         policy: ProcessingPolicy,
+        control: OperationControl,
     ) -> _SourcePlan:
+        control.checkpoint()
         artifact_by_id = {artifact.id: artifact for artifact in artifacts}
         root_entry = next((entry for entry in entries if entry.parent_entry_id is None), None)
         if root_entry is None:
@@ -1094,10 +1136,13 @@ class WorkbenchStructureService:
             node_for_entry = {root_entry.id: root.id}
             queue = deque([root_entry.id])
             while queue:
+                control.checkpoint()
                 parent_entry_id = queue.popleft()
                 parent_node_id = node_for_entry[parent_entry_id]
                 parent_node = self._planned_node(plans, parent_node_id)
                 for entry in self._folder.list_children(entries, parent_entry_id):
+                    control.checkpoint()
+                    control.update(current_item=entry.original_name)
                     if len(plans) >= policy.max_node_count:
                         raise HandlerOutcomeError(
                             status=NodeProcessingStatus.LIMIT_EXCEEDED,
@@ -1160,8 +1205,10 @@ class WorkbenchStructureService:
                         container_queue.append(node_id)
 
         while container_queue:
+            control.checkpoint()
             container_id = container_queue.popleft()
             container_plan = self._planned_plan(plans, container_id)
+            control.update(current_item=container_plan.node.original_name)
             handler = self._handlers.resolve(container_plan.node.format)
             if handler is None:
                 container_plan.node.status = NodeProcessingStatus.UNSUPPORTED
@@ -1185,12 +1232,15 @@ class WorkbenchStructureService:
                 container_plan.error_message = exc.message
                 container_plan.error_retryable = exc.retryable
                 continue
+            control.checkpoint()
             descriptors = inspection.children
             container_plan.backend_identity = inspection.backend_identity
             container_plan.metadata = tuple(inspection.metadata)
             container_plan.node.status = NodeProcessingStatus.SUCCESS
             directories: dict[tuple[str, ...], str] = {(): container_id}
             for descriptor in descriptors:
+                control.checkpoint()
+                control.update(current_item=descriptor.original_name)
                 if len(plans) >= policy.max_node_count:
                     container_plan.node.status = NodeProcessingStatus.LIMIT_EXCEEDED
                     container_plan.error_code = ErrorCode.MAX_NODE_COUNT_EXCEEDED

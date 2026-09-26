@@ -68,6 +68,8 @@ class SnapshotInput:
     locator: str
     kind: SourceKind
     display_name: str
+    entry_count: int
+    total_size: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -105,6 +107,7 @@ class OriginalSnapshotWriteSession(Protocol):
         *,
         policy: SnapshotImportPolicy,
         prior_session_size: int,
+        control=None,
     ) -> CapturedSnapshot: ...
 
     def publish(self) -> None: ...
@@ -113,7 +116,16 @@ class OriginalSnapshotWriteSession(Protocol):
 
 
 class OriginalSnapshotStore(Protocol):
-    def preflight(self, project_path: Path, input_path: Path) -> SnapshotInput: ...
+    def preflight(
+        self,
+        project_path: Path,
+        input_path: Path,
+        *,
+        policy: SnapshotImportPolicy,
+        control=None,
+    ) -> SnapshotInput: ...
+
+    def available_space(self, project_path: Path) -> int: ...
 
     def begin(
         self,
@@ -314,6 +326,8 @@ class StoredWorkspaceExport:
 
 
 class WorkspaceExportStore(Protocol):
+    def available_space(self, destination: Path) -> int: ...
+
     def write(
         self,
         destination: Path,
@@ -325,6 +339,7 @@ class WorkspaceExportStore(Protocol):
         allow_replace: bool,
         maximum_total_size: int,
         chunk_size: int,
+        control=None,
     ) -> StoredWorkspaceExport: ...
 
 

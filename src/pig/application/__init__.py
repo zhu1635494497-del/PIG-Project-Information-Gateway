@@ -62,6 +62,13 @@ from pig.application.contracts import (
     WorkspaceMutationResult,
 )
 from pig.application.service import PigApplication
+from pig.application.operation_control import (
+    CancellationToken,
+    OperationCancelled,
+    OperationControl,
+    OperationProgressSnapshot,
+    OperationStage,
+)
 
 __all__ = [
     "CreateProjectRequest",
@@ -124,4 +131,9 @@ __all__ = [
     "UndoImportedItemResult",
     "WorkspaceItemView",
     "WorkspaceMutationResult",
+    "CancellationToken",
+    "OperationCancelled",
+    "OperationControl",
+    "OperationProgressSnapshot",
+    "OperationStage",
 ]

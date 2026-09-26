@@ -14,6 +14,7 @@ from typing import Callable, Optional
 from uuid import uuid4
 
 from pig.application.errors import ApplicationError
+from pig.application.operation_control import OperationControl, ensure_operation_control
 from pig.application.ports import (
     CapturedOriginalArtifact,
     CapturedSnapshot,
@@ -125,6 +126,7 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
         *,
         policy: SnapshotImportPolicy,
         prior_session_size: int,
+        control: OperationControl | None = None,
     ) -> CapturedSnapshot:
         if self._captured:
             raise ApplicationError(
@@ -134,13 +136,21 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
         self._ensure_staging_root()
         assert self._manifest is not None
         self._manifest.update("WRITING")
+        operation = ensure_operation_control(control)
+        operation.checkpoint()
         if source.kind == SourceKind.FILE:
             captured = self._capture_file_input(
-                source, policy=policy, prior_session_size=prior_session_size
+                source,
+                policy=policy,
+                prior_session_size=prior_session_size,
+                control=operation,
             )
         else:
             captured = self._capture_folder_input(
-                source, policy=policy, prior_session_size=prior_session_size
+                source,
+                policy=policy,
+                prior_session_size=prior_session_size,
+                control=operation,
             )
         self._make_staged_files_read_only(captured.artifacts)
         self._manifest.update("WRITTEN", expected_size=captured.total_size)
@@ -198,6 +208,7 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
         *,
         policy: SnapshotImportPolicy,
         prior_session_size: int,
+        control: OperationControl,
     ) -> CapturedSnapshot:
         artifact_id = self._validated_generated_id()
         entry_id = self._validated_generated_id()
@@ -206,6 +217,8 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
             artifact_id,
             policy=policy,
             prior_total=prior_session_size,
+            control=control,
+            current_item=source.display_name,
         )
         entry = CapturedSnapshotEntry(
             id=entry_id,
@@ -229,6 +242,7 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
         *,
         policy: SnapshotImportPolicy,
         prior_session_size: int,
+        control: OperationControl,
     ) -> CapturedSnapshot:
         root_id = self._validated_generated_id()
         entries: list[CapturedSnapshotEntry] = [
@@ -251,14 +265,17 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
         observed[source.path] = _fact(root_stat)
         queue = deque([(source.path, root_id)])
         total_size = 0
+        control.advance(count=1, current_item=source.display_name)
 
         while queue:
+            control.checkpoint()
             directory, parent_entry_id = queue.popleft()
             members = self._scan_directory(directory)
             directory_members[directory] = tuple(
                 (member.name, member.kind.value) for member in members
             )
             for ordinal, member in enumerate(members):
+                control.checkpoint()
                 if len(entries) >= policy.max_entry_count:
                     raise ApplicationError(
                         code=ErrorCode.MAX_IMPORT_ENTRY_COUNT_EXCEEDED.value,
@@ -280,6 +297,7 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
                         )
                     )
                     queue.append((member.path, entry_id))
+                    control.advance(count=1, current_item=member.name)
                     continue
                 artifact_id = self._validated_generated_id()
                 artifact = self._copy_file(
@@ -287,6 +305,8 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
                     artifact_id,
                     policy=policy,
                     prior_total=prior_session_size + total_size,
+                    control=control,
+                    current_item=member.name,
                 )
                 total_size += artifact.size
                 artifacts.append(artifact)
@@ -317,6 +337,8 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
         *,
         policy: SnapshotImportPolicy,
         prior_total: int,
+        control: OperationControl,
+        current_item: str,
     ) -> CapturedOriginalArtifact:
         before = self._safe_lstat(source)
         if _is_link_like(before):
@@ -353,6 +375,7 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
                 if _is_link_like(opened) or _fact(opened) != _fact(before):
                     self._raise_input_changed(source)
                 while True:
+                    control.checkpoint()
                     chunk = input_stream.read(policy.io_chunk_size)
                     if not chunk:
                         break
@@ -370,6 +393,9 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
                         )
                     output.write(chunk)
                     digest.update(chunk)
+                    control.advance(
+                        byte_count=len(chunk), current_item=current_item
+                    )
                 output.flush()
                 os.fsync(output.fileno())
                 after_open = os.fstat(input_stream.fileno())
@@ -391,6 +417,7 @@ class LocalOriginalSnapshotWriteSession(AbstractContextManager):
         ):
             destination.unlink(missing_ok=True)
             self._raise_input_changed(source)
+        control.advance(count=1, current_item=current_item)
         return CapturedOriginalArtifact(
             id=artifact_id,
             storage_key=self.storage_key(self._snapshot_id, artifact_id),
@@ -609,7 +636,16 @@ class LocalOriginalSnapshotStore:
             project_id
         )
 
-    def preflight(self, project_path: Path, input_path: Path) -> SnapshotInput:
+    def preflight(
+        self,
+        project_path: Path,
+        input_path: Path,
+        *,
+        policy: SnapshotImportPolicy,
+        control: OperationControl | None = None,
+    ) -> SnapshotInput:
+        operation = ensure_operation_control(control)
+        operation.checkpoint()
         project = Path(project_path)
         candidate = Path(input_path)
         if not project.is_absolute() or not candidate.is_absolute():
@@ -635,8 +671,16 @@ class LocalOriginalSnapshotStore:
             )
         if stat.S_ISREG(stat_result.st_mode):
             kind = SourceKind.FILE
+            entry_count = 1
+            total_size = int(stat_result.st_size)
+            self._validate_preflight_size(
+                candidate, total_size, total_size, policy
+            )
         elif stat.S_ISDIR(stat_result.st_mode):
             kind = SourceKind.FOLDER
+            entry_count, total_size = self._measure_folder(
+                resolved, policy=policy, control=operation
+            )
         else:
             raise ApplicationError(
                 code=ErrorCode.UNSUPPORTED_INPUT_TYPE.value,
@@ -658,7 +702,100 @@ class LocalOriginalSnapshotStore:
             locator=resolved.as_uri(),
             kind=kind,
             display_name=display_name,
+            entry_count=entry_count,
+            total_size=total_size,
         )
+
+    @staticmethod
+    def available_space(project_path: Path) -> int:
+        return int(shutil.disk_usage(Path(project_path).resolve(strict=True)).free)
+
+    def _measure_folder(
+        self,
+        root: Path,
+        *,
+        policy: SnapshotImportPolicy,
+        control: OperationControl,
+    ) -> tuple[int, int]:
+        entry_count = 1
+        total_size = 0
+        queue = deque([root])
+        while queue:
+            control.checkpoint()
+            directory = queue.popleft()
+            for member in self._scan_members_for_preflight(directory):
+                control.checkpoint()
+                entry_count += 1
+                if entry_count > policy.max_entry_count:
+                    raise ApplicationError(
+                        code=ErrorCode.MAX_IMPORT_ENTRY_COUNT_EXCEEDED.value,
+                        message="folder snapshot exceeds the configured entry limit",
+                        details={"maximum": policy.max_entry_count},
+                    )
+                if member.kind == OriginalSnapshotEntryKind.FOLDER:
+                    queue.append(member.path)
+                    continue
+                self._validate_preflight_size(
+                    member.path,
+                    member.fact.size,
+                    total_size + member.fact.size,
+                    policy,
+                )
+                total_size += member.fact.size
+        return entry_count, total_size
+
+    def _scan_members_for_preflight(self, directory: Path) -> list[_Member]:
+        try:
+            with os.scandir(directory) as iterator:
+                values = sorted(iterator, key=lambda entry: entry.name)
+        except PermissionError as exc:
+            raise ApplicationError(
+                code=ErrorCode.INPUT_UNREADABLE.value,
+                message="input folder is not readable",
+                details={"path": str(directory)},
+            ) from exc
+        members: list[_Member] = []
+        for value in values:
+            path = Path(value.path)
+            current = LocalOriginalSnapshotWriteSession._safe_lstat(path)
+            if _is_link_like(current):
+                raise ApplicationError(
+                    code=ErrorCode.SYMLINK_BLOCKED.value,
+                    message="folder snapshot contains a symbolic link or reparse point",
+                    details={"path": str(path)},
+                )
+            if stat.S_ISDIR(current.st_mode):
+                kind = OriginalSnapshotEntryKind.FOLDER
+            elif stat.S_ISREG(current.st_mode):
+                kind = OriginalSnapshotEntryKind.FILE
+            else:
+                raise ApplicationError(
+                    code=ErrorCode.UNSUPPORTED_INPUT_TYPE.value,
+                    message="folder snapshot contains an unsupported filesystem entry",
+                    details={"path": str(path)},
+                )
+            members.append(_Member(path=path, name=value.name, kind=kind, fact=_fact(current)))
+        return members
+
+    @staticmethod
+    def _validate_preflight_size(
+        path: Path,
+        single_size: int,
+        total_size: int,
+        policy: SnapshotImportPolicy,
+    ) -> None:
+        if single_size > policy.max_single_file_size:
+            raise ApplicationError(
+                code=ErrorCode.MAX_SINGLE_FILE_SIZE_EXCEEDED.value,
+                message="input file exceeds the configured single-file limit",
+                details={"path": str(path), "maximum": policy.max_single_file_size},
+            )
+        if total_size > policy.max_total_size:
+            raise ApplicationError(
+                code=ErrorCode.MAX_IMPORT_TOTAL_SIZE_EXCEEDED.value,
+                message="snapshot import exceeds the configured total-size limit",
+                details={"maximum": policy.max_total_size},
+            )
 
     def begin(
         self,

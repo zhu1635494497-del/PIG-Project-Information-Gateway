@@ -14,6 +14,12 @@ from pig.application.contracts import (
     VerifyOriginalSnapshotResult,
 )
 from pig.application.errors import ApplicationError
+from pig.application.operation_control import (
+    OperationCancelled,
+    OperationControl,
+    OperationStage,
+    ensure_operation_control,
+)
 from pig.application.ports import OriginalSnapshotStore, ProjectDatabaseProvider
 from pig.domain.entities import (
     ImportSession,
@@ -78,8 +84,12 @@ class SnapshotImportService:
         self._new_id = id_generator
 
     def import_items(
-        self, request: ImportProjectItemsRequest
+        self,
+        request: ImportProjectItemsRequest,
+        *,
+        control: OperationControl | None = None,
     ) -> ImportProjectItemsResult:
+        operation = ensure_operation_control(control)
         project_id = self._required(request.project_id, "project_id")
         actor = self._required(request.actor, "actor")
         database_path = self._absolute(request.database_path, "database_path")
@@ -102,6 +112,108 @@ class SnapshotImportService:
         project_path = database_path.resolve(strict=False).parent
         correlation_id = self._required(
             request.idempotency_key or self._new_id(), "idempotency_key", maximum=36
+        )
+        with self._database.unit_of_work(database_path) as uow:
+            self._project(uow, project_id, database_path)
+            existing = uow.imports.get_session_by_correlation(
+                project_id, correlation_id
+            )
+            if existing is not None:
+                persisted_items = uow.imports.items_for_session(existing.id)
+                if (
+                    tuple(item.input_locator for item in persisted_items)
+                    != tuple(str(path) for path in input_paths)
+                    or dict(existing.policy_snapshot) != request.policy.snapshot()
+                    or existing.actor != actor
+                    or existing.target_workspace_parent_id
+                    != request.target_workspace_parent_id
+                    or existing.expected_workspace_revision
+                    != request.expected_workspace_revision
+                ):
+                    raise ApplicationError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "idempotency_key was already used for a different import request",
+                    )
+                return self._existing_result(uow, existing)
+
+        operation.start_stage(
+            OperationStage.PREFLIGHT,
+            total_count=len(input_paths),
+            current_item=input_paths[0].name,
+        )
+        preflight: list[object] = []
+        try:
+            for path in input_paths:
+                operation.checkpoint()
+                try:
+                    value = self._store.preflight(
+                        project_path,
+                        path,
+                        policy=request.policy,
+                        control=operation,
+                    )
+                except OperationCancelled:
+                    raise
+                except ApplicationError as exc:
+                    value = exc
+                except Exception:
+                    _LOGGER.exception("unexpected snapshot preflight failure")
+                    value = ApplicationError(
+                        ErrorCode.INTERNAL_ERROR.value,
+                        "snapshot preflight failed unexpectedly",
+                        {"technical_reference": self._new_id()},
+                    )
+                preflight.append(value)
+                operation.advance(count=1, current_item=path.name)
+        except OperationCancelled:
+            self._record_preflight_outcome(
+                database_path,
+                project_id,
+                actor,
+                correlation_id,
+                cancelled=True,
+            )
+            raise
+
+        valid_inputs = [
+            value for value in preflight if not isinstance(value, ApplicationError)
+        ]
+        total_entries = sum(value.entry_count for value in valid_inputs)
+        total_bytes = sum(value.total_size for value in valid_inputs)
+        warning = self._resource_warning(
+            total_entries,
+            total_bytes,
+            request.policy.soft_warning_entry_count,
+            request.policy.soft_warning_total_size,
+        )
+        if valid_inputs:
+            free_bytes = self._store.available_space(project_path)
+            required_bytes = total_bytes + request.policy.minimum_free_space_bytes
+            if free_bytes < required_bytes:
+                failure = ApplicationError(
+                    "INSUFFICIENT_DISK_SPACE",
+                    "Project storage does not have enough free space for the snapshot",
+                    {
+                        "required_bytes": required_bytes,
+                        "available_bytes": free_bytes,
+                        "input_bytes": total_bytes,
+                    },
+                )
+                self._record_preflight_outcome(
+                    database_path,
+                    project_id,
+                    actor,
+                    correlation_id,
+                    cancelled=False,
+                    failure=failure,
+                )
+                raise failure
+        operation.start_stage(
+            OperationStage.SNAPSHOT_COPY,
+            total_count=total_entries,
+            total_bytes=total_bytes,
+            current_item=input_paths[0].name,
+            warning=warning,
         )
         with self._database.unit_of_work(database_path) as uow:
             project = self._project(uow, project_id, database_path)
@@ -239,11 +351,22 @@ class SnapshotImportService:
         session_size = 0
         results: list[ImportItemResult] = []
         for ordinal, path in enumerate(input_paths):
+            try:
+                operation.checkpoint()
+            except OperationCancelled:
+                self._interrupt_waiting(
+                    database_path,
+                    project_id,
+                    session_id,
+                    actor,
+                    correlation_id,
+                )
+                raise
             with self._database.unit_of_work(database_path) as uow:
                 item = uow.imports.items_for_session(session_id)[ordinal]
-            try:
-                source_input = self._store.preflight(project_path, path)
-            except ApplicationError as exc:
+            prepared = preflight[ordinal]
+            if isinstance(prepared, ApplicationError):
+                exc = prepared
                 failed += 1
                 self._fail_item(
                     database_path, item, actor, correlation_id, exc
@@ -258,27 +381,7 @@ class SnapshotImportService:
                     )
                 )
                 continue
-            except Exception:
-                _LOGGER.exception("unexpected snapshot preflight failure")
-                failed += 1
-                failure = ApplicationError(
-                    ErrorCode.INTERNAL_ERROR.value,
-                    "snapshot capture failed unexpectedly",
-                    {"technical_reference": self._new_id()},
-                )
-                self._fail_item(
-                    database_path, item, actor, correlation_id, failure
-                )
-                results.append(
-                    ImportItemResult(
-                        input_path=path,
-                        snapshot_id=None,
-                        captured=False,
-                        error_code=failure.code,
-                        error_message=failure.message,
-                    )
-                )
-                continue
+            source_input = prepared
 
             snapshot_id = self._new_id()
             created_at = self._clock()
@@ -329,20 +432,26 @@ class SnapshotImportService:
                         source_input,
                         policy=request.policy,
                         prior_session_size=session_size,
+                        control=operation,
                     )
-                    write.publish()
-                    source_id, node_id = self._persist_capture(
-                        database_path=database_path,
-                        project_id=project_id,
-                        session_id=session_id,
-                        item_id=item.id,
-                        snapshot_id=snapshot_id,
-                        source_input=source_input,
-                        captured=captured,
-                        actor=actor,
-                        correlation_id=correlation_id,
-                    )
-                    write.complete()
+                    operation.checkpoint()
+                    operation.update(cancellable=False)
+                    try:
+                        write.publish()
+                        source_id, node_id = self._persist_capture(
+                            database_path=database_path,
+                            project_id=project_id,
+                            session_id=session_id,
+                            item_id=item.id,
+                            snapshot_id=snapshot_id,
+                            source_input=source_input,
+                            captured=captured,
+                            actor=actor,
+                            correlation_id=correlation_id,
+                        )
+                        write.complete()
+                    finally:
+                        operation.update(cancellable=True)
                 accepted += 1
                 session_size += captured.total_size
                 results.append(
@@ -354,6 +463,12 @@ class SnapshotImportService:
                         root_node_id=node_id,
                     )
                 )
+            except OperationCancelled:
+                self._interrupt(
+                    database_path, project_id, session_id, item.id, snapshot_id,
+                    actor, correlation_id,
+                )
+                raise
             except (KeyboardInterrupt, SystemExit):
                 self._interrupt(
                     database_path, project_id, session_id, item.id, snapshot_id,
@@ -397,47 +512,62 @@ class SnapshotImportService:
                     )
                 )
 
-        with self._database.unit_of_work(database_path) as uow:
-            if accepted:
-                final_status = ImportSessionStatus.INSPECTING
-                event_type = EventType.IMPORT_SNAPSHOT_CAPTURE_FINISHED
-                severity = EventSeverity.WARNING if failed else EventSeverity.INFO
-                project_new_status = None
-                finished_at = None
-            else:
-                final_status = ImportSessionStatus.FAILED
-                event_type = EventType.IMPORT_FAILED
-                severity = EventSeverity.ERROR
-                project_new_status = ProjectStatus.FAILED
-                finished_at = self._clock()
-            uow.imports.update_session_status(
-                session_id,
-                ImportSessionStatus.SNAPSHOTTING,
-                final_status,
-                accepted_item_count=accepted,
-                failed_item_count=failed,
-                finished_at=finished_at,
-            )
-            if project_new_status is not None:
-                uow.projects.update_status(
-                    project_id,
-                    ProjectStatus.IMPORTING,
-                    project_new_status,
-                    self._clock(),
-                )
-            self._event(
-                uow,
-                event_type,
+        try:
+            operation.checkpoint()
+        except OperationCancelled:
+            self._interrupt_waiting(
+                database_path,
                 project_id,
+                session_id,
                 actor,
                 correlation_id,
-                import_session_id=session_id,
-                severity=severity,
-                previous_status=ImportSessionStatus.SNAPSHOTTING.value,
-                new_status=final_status.value,
-                details={"accepted_item_count": accepted, "failed_item_count": failed},
             )
-            uow.commit()
+            raise
+        operation.update(cancellable=False)
+        try:
+            with self._database.unit_of_work(database_path) as uow:
+                if accepted:
+                    final_status = ImportSessionStatus.INSPECTING
+                    event_type = EventType.IMPORT_SNAPSHOT_CAPTURE_FINISHED
+                    severity = EventSeverity.WARNING if failed else EventSeverity.INFO
+                    project_new_status = None
+                    finished_at = None
+                else:
+                    final_status = ImportSessionStatus.FAILED
+                    event_type = EventType.IMPORT_FAILED
+                    severity = EventSeverity.ERROR
+                    project_new_status = ProjectStatus.FAILED
+                    finished_at = self._clock()
+                uow.imports.update_session_status(
+                    session_id,
+                    ImportSessionStatus.SNAPSHOTTING,
+                    final_status,
+                    accepted_item_count=accepted,
+                    failed_item_count=failed,
+                    finished_at=finished_at,
+                )
+                if project_new_status is not None:
+                    uow.projects.update_status(
+                        project_id,
+                        ProjectStatus.IMPORTING,
+                        project_new_status,
+                        self._clock(),
+                    )
+                self._event(
+                    uow,
+                    event_type,
+                    project_id,
+                    actor,
+                    correlation_id,
+                    import_session_id=session_id,
+                    severity=severity,
+                    previous_status=ImportSessionStatus.SNAPSHOTTING.value,
+                    new_status=final_status.value,
+                    details={"accepted_item_count": accepted, "failed_item_count": failed},
+                )
+                uow.commit()
+        finally:
+            operation.update(cancellable=True)
         return ImportProjectItemsResult(
             project_id=project_id,
             import_session_id=session_id,
@@ -773,7 +903,139 @@ class SnapshotImportService:
                 severity=EventSeverity.WARNING,
                 new_status=ImportSessionStatus.INTERRUPTED.value,
             )
+            project = uow.projects.get(project_id)
+            if project is not None and project.status == ProjectStatus.IMPORTING:
+                uow.projects.update_status(
+                    project_id,
+                    ProjectStatus.IMPORTING,
+                    ProjectStatus.FAILED,
+                    self._clock(),
+                )
+                self._event(
+                    uow,
+                    EventType.PROJECT_STATUS_CHANGED,
+                    project_id,
+                    actor,
+                    correlation_id,
+                    severity=EventSeverity.WARNING,
+                    import_session_id=session_id,
+                    previous_status=ProjectStatus.IMPORTING.value,
+                    new_status=ProjectStatus.FAILED.value,
+                    details={"reason": "user_cancelled"},
+                )
             uow.commit()
+
+    def _interrupt_waiting(
+        self,
+        database_path: Path,
+        project_id: str,
+        session_id: str,
+        actor: str,
+        correlation_id: str,
+    ) -> None:
+        now = self._clock()
+        with self._database.unit_of_work(database_path) as uow:
+            session = uow.imports.get_session(session_id)
+            if session is None or session.status != ImportSessionStatus.SNAPSHOTTING:
+                return
+            for item in uow.imports.items_for_session(session_id):
+                if item.status == ImportItemStatus.PENDING:
+                    uow.imports.update_session_item(
+                        item.id,
+                        ImportItemStatus.PENDING,
+                        ImportItemStatus.INTERRUPTED,
+                        updated_at=now,
+                        error_code="OPERATION_CANCELLED",
+                        error_message="snapshot import was cancelled before capture",
+                    )
+            uow.imports.update_session_status(
+                session_id,
+                ImportSessionStatus.SNAPSHOTTING,
+                ImportSessionStatus.INTERRUPTED,
+                finished_at=now,
+            )
+            project = uow.projects.get(project_id)
+            if project is not None and project.status == ProjectStatus.IMPORTING:
+                uow.projects.update_status(
+                    project_id,
+                    ProjectStatus.IMPORTING,
+                    ProjectStatus.FAILED,
+                    now,
+                )
+            self._event(
+                uow,
+                EventType.IMPORT_INTERRUPTED,
+                project_id,
+                actor,
+                correlation_id,
+                import_session_id=session_id,
+                severity=EventSeverity.WARNING,
+                previous_status=ImportSessionStatus.SNAPSHOTTING.value,
+                new_status=ImportSessionStatus.INTERRUPTED.value,
+                details={"reason": "user_cancelled_between_inputs"},
+            )
+            uow.commit()
+
+    def _record_preflight_outcome(
+        self,
+        database_path: Path,
+        project_id: str,
+        actor: str,
+        correlation_id: str,
+        *,
+        cancelled: bool,
+        failure: Optional[ApplicationError] = None,
+    ) -> None:
+        event_type = EventType.IMPORT_INTERRUPTED if cancelled else EventType.IMPORT_FAILED
+        error_code = (
+            None
+            if cancelled
+            else self._error_enum(
+                ErrorCode.INTERNAL_ERROR.value
+                if failure is None
+                else failure.code
+            )
+        )
+        with self._database.unit_of_work(database_path) as uow:
+            self._project(uow, project_id, database_path)
+            self._event(
+                uow,
+                event_type,
+                project_id,
+                actor,
+                correlation_id,
+                severity=EventSeverity.WARNING if cancelled else EventSeverity.ERROR,
+                error_code=error_code,
+                details={
+                    "stage": OperationStage.PREFLIGHT.value,
+                    "failure_code": (
+                        "OPERATION_CANCELLED"
+                        if cancelled
+                        else (
+                            ErrorCode.INTERNAL_ERROR.value
+                            if failure is None
+                            else failure.code
+                        )
+                    ),
+                },
+            )
+            uow.commit()
+
+    @staticmethod
+    def _resource_warning(
+        entry_count: int,
+        total_size: int,
+        entry_threshold: int,
+        size_threshold: int,
+    ) -> Optional[str]:
+        reasons = []
+        if entry_count >= entry_threshold:
+            reasons.append(f"{entry_count} entries")
+        if total_size >= size_threshold:
+            reasons.append(f"{total_size} bytes")
+        if not reasons:
+            return None
+        return "Large input: " + ", ".join(reasons)
 
     def _existing_result(self, uow, session: ImportSession) -> ImportProjectItemsResult:
         items = []

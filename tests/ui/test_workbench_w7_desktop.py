@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
-from pig.application import CreateProjectRequest
+from pig.application import CreateProjectRequest, OperationStage
 from pig.bootstrap import create_local_application
 from pig.domain.enums import (
     NodeFormat,
@@ -219,6 +219,57 @@ def test_busy_gate_keeps_window_responsive_and_serializes_actions(
     release.set()
     _wait_idle(qt_app, window)
     assert results == ["done"]
+    window.close()
+
+
+def test_typed_progress_appears_quickly_and_cancel_keeps_ui_responsive(
+    qt_app, tmp_path: Path, monkeypatch
+) -> None:
+    app = create_local_application(tmp_path / "projects")
+    window = MainWindow(app, actor="tester")
+    messages = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        staticmethod(lambda _parent, title, message: messages.append((title, message))),
+    )
+    started = Event()
+
+    def cancellable_action(control):
+        control.start_stage(
+            OperationStage.SNAPSHOT_COPY,
+            total_count=1,
+            total_bytes=1024,
+            current_item="large.bin",
+        )
+        started.set()
+        while True:
+            control.checkpoint()
+            time.sleep(0.01)
+
+    started_at = time.monotonic()
+    window._run_background(
+        "可取消操作",
+        cancellable_action,
+        lambda _result: None,
+        progress=True,
+    )
+    while time.monotonic() - started_at < 0.5:
+        qt_app.processEvents()
+        if not window.cancel_operation_button.isHidden():
+            break
+        time.sleep(0.01)
+
+    assert started.is_set()
+    assert not window.cancel_operation_button.isHidden()
+    assert window.cancel_operation_button.isEnabled()
+    assert "large.bin" in window.statusBar().currentMessage()
+    window.search_text.setText("窗口仍可响应")
+    assert window.search_text.text() == "窗口仍可响应"
+    window.cancel_operation_button.click()
+    _wait_idle(qt_app, window)
+    assert messages[-1][0] == "可取消操作"
+    assert "安全检查点" in messages[-1][1]
     window.close()
 
 

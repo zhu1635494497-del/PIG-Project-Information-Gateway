@@ -13,6 +13,9 @@ class SnapshotImportPolicy:
     max_single_file_size: int = 2 * 1024 * 1024 * 1024
     max_total_size: int = 20 * 1024 * 1024 * 1024
     io_chunk_size: int = 1024 * 1024
+    minimum_free_space_bytes: int = 256 * 1024 * 1024
+    soft_warning_entry_count: int = 2_000
+    soft_warning_total_size: int = 80 * 1024 * 1024
 
     def __post_init__(self) -> None:
         values = (
@@ -20,11 +23,15 @@ class SnapshotImportPolicy:
             self.max_entry_count,
             self.max_single_file_size,
             self.io_chunk_size,
+            self.soft_warning_entry_count,
+            self.soft_warning_total_size,
         )
         if any(value <= 0 for value in values):
             raise ValueError("snapshot import limits must be positive")
         if self.max_total_size < 0:
             raise ValueError("max_total_size must be nonnegative")
+        if self.minimum_free_space_bytes < 0:
+            raise ValueError("minimum_free_space_bytes must be nonnegative")
 
     def snapshot(self) -> dict[str, Any]:
         return asdict(self)

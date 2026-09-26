@@ -257,7 +257,7 @@ class _InterruptingWrite:
     def __exit__(self, exc_type, exc, traceback):
         return None
 
-    def capture(self, source, *, policy, prior_session_size):
+    def capture(self, source, *, policy, prior_session_size, control=None):
         raise KeyboardInterrupt()
 
     def publish(self):
@@ -276,7 +276,7 @@ class _FailingWrite(_InterruptingWrite):
     def __init__(self, code: str) -> None:
         self._code = code
 
-    def capture(self, source, *, policy, prior_session_size):
+    def capture(self, source, *, policy, prior_session_size, control=None):
         raise ApplicationError(self._code, "injected snapshot failure")
 
 

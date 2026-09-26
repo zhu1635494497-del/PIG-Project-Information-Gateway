@@ -13,6 +13,11 @@ from pig.application.contracts import (
     RefreshWorkingArtifactRequest,
 )
 from pig.application.errors import ApplicationError
+from pig.application.operation_control import (
+    OperationControl,
+    OperationStage,
+    ensure_operation_control,
+)
 from pig.application.ports import (
     OriginalSnapshotStore,
     ProjectDatabaseProvider,
@@ -73,7 +78,15 @@ class WorkspaceExportService:
         self._clock = clock
         self._new_id = id_generator
 
-    def export(self, request: ExportWorkspaceItemsRequest) -> ExportWorkspaceItemsResult:
+    def export(
+        self,
+        request: ExportWorkspaceItemsRequest,
+        *,
+        control: OperationControl | None = None,
+    ) -> ExportWorkspaceItemsResult:
+        operation = ensure_operation_control(control)
+        operation.start_stage(OperationStage.EXPORT_PREPARATION)
+        operation.checkpoint()
         project_id = request.project_id.strip()
         actor = request.actor.strip()
         database_path = Path(request.database_path).expanduser().resolve(strict=False)
@@ -218,6 +231,14 @@ class WorkspaceExportService:
             )
             uow.commit()
 
+        operation.start_stage(
+            OperationStage.EXPORT_PREPARATION,
+            total_count=len(export_items),
+            current_item=(
+                None if not export_items else export_items[0].item.display_name
+            ),
+        )
+
         folded: dict[str, str] = {}
         for item_id, value in relative_paths.items():
             key = value.casefold()
@@ -241,7 +262,9 @@ class WorkspaceExportService:
         try:
             entries = []
             for record in export_items:
+                operation.checkpoint()
                 item = record.item
+                operation.update(current_item=item.display_name)
                 artifact = record.working_artifact
                 original = direct_originals.get(
                     item.origin_source_node_id or ""
@@ -323,6 +346,29 @@ class WorkspaceExportService:
                         sha256=sha256,
                     )
                 )
+                operation.advance(count=1, current_item=item.display_name)
+            total_bytes = sum(entry.size for entry in entries)
+            warning = self._resource_warning(
+                len(entries),
+                total_bytes,
+                request.policy.soft_warning_entry_count,
+                request.policy.soft_warning_total_size,
+            )
+            if warning is not None:
+                operation.update(warning=warning)
+            free_bytes = self._store.available_space(destination)
+            required_bytes = total_bytes + request.policy.minimum_free_space_bytes
+            if free_bytes < required_bytes:
+                raise ApplicationError(
+                    "INSUFFICIENT_DISK_SPACE",
+                    "Export destination does not have enough free space",
+                    {
+                        "required_bytes": required_bytes,
+                        "available_bytes": free_bytes,
+                        "export_bytes": total_bytes,
+                    },
+                )
+            operation.checkpoint()
             stored = self._store.write(
                 destination,
                 operation_id,
@@ -337,6 +383,7 @@ class WorkspaceExportService:
                 allow_replace=request.confirmed_replace,
                 maximum_total_size=request.policy.max_total_expanded_size,
                 chunk_size=request.policy.io_chunk_size,
+                control=operation,
             )
         except BaseException as exc:
             self._failed(database_path, project_id, actor, operation_id, exc)
@@ -424,7 +471,12 @@ class WorkspaceExportService:
                     project_id,
                     actor,
                     operation_id,
-                    severity=EventSeverity.ERROR,
+                    severity=(
+                        EventSeverity.WARNING
+                        if getattr(failure, "code", None)
+                        == "OPERATION_CANCELLED"
+                        else EventSeverity.ERROR
+                    ),
                     error_code=code,
                     details={
                         "failure_code": getattr(
@@ -461,6 +513,22 @@ class WorkspaceExportService:
                 details={} if details is None else details,
             )
         )
+
+    @staticmethod
+    def _resource_warning(
+        entry_count: int,
+        total_size: int,
+        entry_threshold: int,
+        size_threshold: int,
+    ) -> str | None:
+        reasons = []
+        if entry_count >= entry_threshold:
+            reasons.append(f"{entry_count} entries")
+        if total_size >= size_threshold:
+            reasons.append(f"{total_size} bytes")
+        if not reasons:
+            return None
+        return "Large export: " + ", ".join(reasons)
 
     @staticmethod
     def _project(project, database_path: Path) -> None:

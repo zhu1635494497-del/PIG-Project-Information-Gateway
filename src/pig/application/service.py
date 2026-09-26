@@ -76,6 +76,7 @@ from pig.application.contracts import (
     WorkspaceMutationResult,
 )
 from pig.application.errors import ApplicationError
+from pig.application.operation_control import OperationControl, ensure_operation_control
 from pig.application.manifest import (
     MANIFEST_SCHEMA_VERSION,
     build_manifest_document,
@@ -180,7 +181,10 @@ class PigApplication:
         self._workbench_recovery_service = workbench_recovery_service
 
     def import_project_items(
-        self, request: ImportProjectItemsRequest
+        self,
+        request: ImportProjectItemsRequest,
+        *,
+        control: OperationControl | None = None,
     ) -> ImportProjectItemsResult:
         self._assert_writable(request.project_id, request.database_path)
         if self._snapshot_import_service is None:
@@ -188,7 +192,12 @@ class PigApplication:
                 code="SNAPSHOT_IMPORT_NOT_CONFIGURED",
                 message="immutable snapshot import is not configured",
             )
-        return self._snapshot_import_service.import_items(request)
+        operation = ensure_operation_control(control)
+        result = self._snapshot_import_service.import_items(
+            request, control=operation
+        )
+        operation.complete()
+        return result
 
     def verify_original_snapshot(
         self, request: VerifyOriginalSnapshotRequest
@@ -202,14 +211,20 @@ class PigApplication:
         return self._snapshot_import_service.verify(request)
 
     def inspect_import_session(
-        self, request: InspectImportSessionRequest
+        self,
+        request: InspectImportSessionRequest,
+        *,
+        control: OperationControl | None = None,
     ) -> InspectImportSessionResult:
         if self._structure_service is None:
             raise ApplicationError(
                 code="STRUCTURE_INSPECTION_NOT_CONFIGURED",
                 message="Workbench structure inspection is not configured",
             )
-        return self._structure_service.inspect(request)
+        operation = ensure_operation_control(control)
+        result = self._structure_service.inspect(request, control=operation)
+        operation.complete()
+        return result
 
     def materialize_workspace_item(
         self, request: MaterializeWorkspaceItemRequest
@@ -262,7 +277,10 @@ class PigApplication:
         return self._workspace_queries().search(request)
 
     def export_workspace_items(
-        self, request: ExportWorkspaceItemsRequest
+        self,
+        request: ExportWorkspaceItemsRequest,
+        *,
+        control: OperationControl | None = None,
     ) -> ExportWorkspaceItemsResult:
         self._assert_writable(request.project_id, request.database_path)
         if self._workspace_export_service is None:
@@ -270,7 +288,10 @@ class PigApplication:
                 "WORKSPACE_EXPORT_NOT_CONFIGURED",
                 "Workspace export is not configured",
             )
-        return self._workspace_export_service.export(request)
+        operation = ensure_operation_control(control)
+        result = self._workspace_export_service.export(request, control=operation)
+        operation.complete()
+        return result
 
     def preview_import_undo(
         self, request: PreviewImportUndoRequest
@@ -316,9 +337,19 @@ class PigApplication:
         return self._workspace_actions().restore(request)
 
     def add_workspace_inputs(
-        self, request: AddWorkspaceInputsRequest
+        self,
+        request: AddWorkspaceInputsRequest,
+        *,
+        control: OperationControl | None = None,
     ) -> AddWorkspaceInputsResult:
-        imported = self.import_project_items(
+        self._assert_writable(request.project_id, request.database_path)
+        if self._snapshot_import_service is None:
+            raise ApplicationError(
+                code="SNAPSHOT_IMPORT_NOT_CONFIGURED",
+                message="immutable snapshot import is not configured",
+            )
+        operation = ensure_operation_control(control)
+        imported = self._snapshot_import_service.import_items(
             ImportProjectItemsRequest(
                 project_id=request.project_id,
                 database_path=request.database_path,
@@ -328,7 +359,8 @@ class PigApplication:
                 policy=request.snapshot_policy,
                 target_workspace_parent_id=request.target_workspace_parent_id,
                 expected_workspace_revision=request.expected_workspace_revision,
-            )
+            ),
+            control=operation,
         )
         inspected = None
         if imported.accepted_item_count > 0:
@@ -344,19 +376,22 @@ class PigApplication:
                     import_session_id=imported.import_session_id,
                     actor=request.actor,
                     policy=request.processing_policy,
-                )
+                ),
+                control=operation,
             )
         with self._database.unit_of_work(request.database_path) as uow:
             project = uow.projects.get(request.project_id)
             if project is None:
                 raise EntityNotFoundError(f"project not found: {request.project_id}")
             revision = project.workspace_revision
-        return AddWorkspaceInputsResult(
+        result = AddWorkspaceInputsResult(
             project_id=request.project_id,
             workspace_revision=revision,
             import_result=imported,
             inspection_result=inspected,
         )
+        operation.complete()
+        return result
 
     def inspect_project_recovery(
         self, request: InspectProjectRecoveryRequest
@@ -1029,7 +1064,10 @@ class OpenService(Protocol):
 
 class SnapshotImportService(Protocol):
     def import_items(
-        self, request: ImportProjectItemsRequest
+        self,
+        request: ImportProjectItemsRequest,
+        *,
+        control: OperationControl | None = None,
     ) -> ImportProjectItemsResult: ...
 
     def verify(
@@ -1039,7 +1077,10 @@ class SnapshotImportService(Protocol):
 
 class WorkbenchStructureService(Protocol):
     def inspect(
-        self, request: InspectImportSessionRequest
+        self,
+        request: InspectImportSessionRequest,
+        *,
+        control: OperationControl | None = None,
     ) -> InspectImportSessionResult: ...
 
     def materialize(
@@ -1079,7 +1120,10 @@ class WorkspaceQueryService(Protocol):
 
 class WorkspaceExportService(Protocol):
     def export(
-        self, request: ExportWorkspaceItemsRequest
+        self,
+        request: ExportWorkspaceItemsRequest,
+        *,
+        control: OperationControl | None = None,
     ) -> ExportWorkspaceItemsResult: ...
 
 

@@ -16,6 +16,9 @@ class ProcessingPolicy:
     io_chunk_size: int = 1024 * 1024
     max_external_listing_size: int = 64 * 1024 * 1024
     external_process_timeout_seconds: float = 120.0
+    minimum_free_space_bytes: int = 256 * 1024 * 1024
+    soft_warning_entry_count: int = 500
+    soft_warning_total_size: int = 80 * 1024 * 1024
 
     def __post_init__(self) -> None:
         positive_integer_limits = (
@@ -26,6 +29,8 @@ class ProcessingPolicy:
             self.max_single_file_size,
             self.io_chunk_size,
             self.max_external_listing_size,
+            self.soft_warning_entry_count,
+            self.soft_warning_total_size,
         )
         if any(value <= 0 for value in positive_integer_limits):
             raise ValueError("all integer processing limits must be positive")
@@ -35,6 +40,8 @@ class ProcessingPolicy:
             raise ValueError("max_compression_ratio must be positive")
         if self.external_process_timeout_seconds <= 0:
             raise ValueError("external_process_timeout_seconds must be positive")
+        if self.minimum_free_space_bytes < 0:
+            raise ValueError("minimum_free_space_bytes must be nonnegative")
 
     def snapshot(self) -> dict[str, Any]:
         return asdict(self)

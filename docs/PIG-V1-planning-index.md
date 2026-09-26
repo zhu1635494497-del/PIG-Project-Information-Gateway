@@ -1,7 +1,7 @@
 # PIG V1 当前规划索引 / PIG V1 Active Planning Index
 
 - 当前日期：2026-09-26 / Date: 2026-09-26
-- 当前阶段：Workbench W10.1–W10.3 已完成；W10.4 待进入 / Current phase: Workbench W10.1-W10.3 complete; W10.4 pending entry
+- 当前阶段：Workbench W10.1–W10.4 已完成；W10.5 待进入 / Current phase: Workbench W10.1-W10.4 complete; W10.5 pending entry
 - 代码授权：W1–W10；D92–D99 已批准，正式外发仍受人工 Gate 约束 / Code authorization: W1-W10; D92-D99 approved, with official distribution still gated by human review
 
 ## 当前规范优先级 / Active authority order

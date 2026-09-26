@@ -55,6 +55,9 @@ from pig.application import (
     LoadProjectRequest,
     MoveWorkspaceItemRequest,
     OpenWorkspaceItemRequest,
+    OperationControl,
+    OperationProgressSnapshot,
+    OperationStage,
     PreviewImportUndoRequest,
     PigApplication,
     RefreshWorkingArtifactRequest,
@@ -524,6 +527,8 @@ class MainWindow(QMainWindow):
         self._worker_thread: Future | None = None
         self._background_success: Callable[[object], None] | None = None
         self._background_operation: str | None = None
+        self._background_control: OperationControl | None = None
+        self._background_progress_sequence = 0
         self._background_timer = QTimer(self)
         self._background_timer.setInterval(20)
         self._background_timer.timeout.connect(self._poll_background)
@@ -851,9 +856,15 @@ class MainWindow(QMainWindow):
                 viewport().setAcceptDrops(False)
 
         self.busy_indicator = QProgressBar()
-        self.busy_indicator.setRange(0, 0)
-        self.busy_indicator.setMaximumWidth(130)
+        self.busy_indicator.setRange(0, 100)
+        self.busy_indicator.setMaximumWidth(180)
+        self.busy_indicator.setTextVisible(True)
         self.busy_indicator.hide()
+        self.cancel_operation_button = QPushButton("取消")
+        self.cancel_operation_button.setToolTip("在下一个安全检查点停止当前操作")
+        self.cancel_operation_button.clicked.connect(self._cancel_background)
+        self.cancel_operation_button.hide()
+        self.statusBar().addPermanentWidget(self.cancel_operation_button)
         self.statusBar().addPermanentWidget(self.busy_indicator)
         self.statusBar().showMessage("请新建或打开一个 Workbench Project")
 
@@ -1047,7 +1058,7 @@ class MainWindow(QMainWindow):
             return
         self._run_background(
             "添加项目资料",
-            lambda: self._application.add_workspace_inputs(
+            lambda control: self._application.add_workspace_inputs(
                 AddWorkspaceInputsRequest(
                     project_id=self._project_id,
                     database_path=self._database_path,
@@ -1055,9 +1066,11 @@ class MainWindow(QMainWindow):
                     actor=self._actor,
                     expected_workspace_revision=self._workspace_revision,
                     target_workspace_parent_id=target_id,
-                )
+                ),
+                control=control,
             ),
             self._inputs_added,
+            progress=True,
         )
 
     def _inputs_added(self, result) -> None:
@@ -1413,7 +1426,7 @@ class MainWindow(QMainWindow):
                     return
         self._run_background(
             "导出 Workspace 文件",
-            lambda: self._application.export_workspace_items(
+            lambda control: self._application.export_workspace_items(
                 ExportWorkspaceItemsRequest(
                     project_id=self._project_id,
                     database_path=self._database_path,
@@ -1421,9 +1434,11 @@ class MainWindow(QMainWindow):
                     destination_path=destination,
                     actor=self._actor,
                     confirmed_replace=confirmed,
-                )
+                ),
+                control=control,
             ),
             self._export_completed,
+            progress=True,
         )
 
     def _export_completed(self, result) -> None:
@@ -1910,13 +1925,25 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values):
                 self.events.setItem(row, column, QTableWidgetItem(value))
 
-    def _run_background(self, operation, action, on_success) -> None:
+    def _run_background(
+        self,
+        operation,
+        action,
+        on_success,
+        *,
+        progress: bool = False,
+    ) -> None:
         if self._worker_thread is not None:
             QMessageBox.information(
                 self, operation, f"请等待当前操作完成：{self._busy_operation}"
             )
             return
-        self._worker_thread = self._executor.submit(action)
+        self._background_control = OperationControl() if progress else None
+        self._background_progress_sequence = 0
+        self._worker_thread = self._executor.submit(
+            action,
+            self._background_control,
+        ) if progress else self._executor.submit(action)
         self._background_success = on_success
         self._background_operation = operation
         self._busy_operation = operation
@@ -1926,6 +1953,14 @@ class MainWindow(QMainWindow):
 
     def _poll_background(self) -> None:
         future = self._worker_thread
+        if self._background_control is not None:
+            snapshot = self._background_control.latest
+            if (
+                snapshot is not None
+                and snapshot.sequence != self._background_progress_sequence
+            ):
+                self._background_progress_sequence = snapshot.sequence
+                self._render_operation_progress(snapshot)
         if future is None or not future.done():
             return
         self._background_timer.stop()
@@ -1935,6 +1970,7 @@ class MainWindow(QMainWindow):
         self._background_success = None
         self._background_operation = None
         self._busy_operation = None
+        self._background_control = None
         self._set_busy(False)
         try:
             result = future.result()
@@ -1950,6 +1986,13 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         self.busy_indicator.setVisible(busy)
+        if busy and self._background_control is None:
+            self.busy_indicator.setRange(0, 0)
+        elif busy:
+            self.busy_indicator.setRange(0, 100)
+            self.busy_indicator.setValue(0)
+        else:
+            self.cancel_operation_button.hide()
         self.new_project_action.setEnabled(not busy)
         self.open_project_action.setEnabled(not busy)
         self._set_project_actions_enabled(self._has_project() and not busy)
@@ -1992,7 +2035,10 @@ class MainWindow(QMainWindow):
 
     def _show_failure(self, operation: str, exc: BaseException) -> None:
         if isinstance(exc, ApplicationError):
-            QMessageBox.warning(self, operation, f"{exc.message}\n\n错误码：{exc.code}")
+            if exc.code == "OPERATION_CANCELLED":
+                QMessageBox.information(self, operation, "操作已在安全检查点停止。")
+            else:
+                QMessageBox.warning(self, operation, f"{exc.message}\n\n错误码：{exc.code}")
         else:
             self._logger.error(
                 "desktop background operation failed: %s",
@@ -2000,6 +2046,49 @@ class MainWindow(QMainWindow):
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
             QMessageBox.critical(self, operation, "操作失败。技术细节已写入应用日志。")
+
+    def _cancel_background(self) -> None:
+        control = self._background_control
+        if control is None:
+            return
+        control.cancel()
+        self.cancel_operation_button.setEnabled(False)
+        self.statusBar().showMessage("已请求取消，正在等待安全检查点…")
+
+    def _render_operation_progress(
+        self, snapshot: OperationProgressSnapshot
+    ) -> None:
+        labels = {
+            OperationStage.PREFLIGHT: "正在检查输入",
+            OperationStage.SNAPSHOT_COPY: "正在建立原始备份",
+            OperationStage.STRUCTURE_INSPECTION: "正在分析文件结构",
+            OperationStage.EXPORT_PREPARATION: "正在准备导出",
+            OperationStage.EXPORT_WRITE: "正在写入导出文件",
+            OperationStage.FINALIZING: "正在完成原子发布",
+            OperationStage.COMPLETED: "操作完成",
+        }
+        ratio = snapshot.ratio
+        if ratio is None:
+            self.busy_indicator.setRange(0, 0)
+        else:
+            self.busy_indicator.setRange(0, 100)
+            self.busy_indicator.setValue(round(ratio * 100))
+        self.cancel_operation_button.setVisible(
+            snapshot.stage != OperationStage.COMPLETED
+        )
+        self.cancel_operation_button.setEnabled(
+            snapshot.cancellable and not snapshot.cancellation_requested
+        )
+        message = labels[snapshot.stage]
+        if snapshot.current_item:
+            message += f"：{snapshot.current_item}"
+        if snapshot.warning:
+            message += f"（{snapshot.warning}）"
+        if snapshot.cancellation_requested:
+            message = "已请求取消，正在等待安全检查点…"
+        elif not snapshot.cancellable and snapshot.stage != OperationStage.COMPLETED:
+            message += "（正在完成，暂不可取消）"
+        self.statusBar().showMessage(message)
 
     def event(self, event: QEvent) -> bool:
         result = super().event(event)
