@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional, Sequence
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import func, insert, or_, select, text
 from sqlalchemy.orm import Session, aliased
 
 from pig.domain import entities, enums
@@ -23,6 +23,14 @@ from pig.domain.transitions import (
 )
 from pig.infrastructure.database import models
 from pig.domain.repositories import WorkspaceReadRecord
+
+
+_WRITE_BATCH_SIZE = 1_000
+
+
+def _write_batches(session: Session, model, rows: Sequence[dict]) -> None:
+    for start in range(0, len(rows), _WRITE_BATCH_SIZE):
+        session.execute(insert(model), rows[start : start + _WRITE_BATCH_SIZE])
 
 
 def _session_from_model(row: models.ImportSessionModel) -> entities.ImportSession:
@@ -690,6 +698,68 @@ class SqlAlchemyImportRepository:
         self._session.add(row)
         self._session.flush([row])
 
+    def add_original_artifacts(
+        self, artifacts: Sequence[entities.OriginalArtifact]
+    ) -> None:
+        if not artifacts:
+            return
+        snapshot_ids = {artifact.snapshot_id for artifact in artifacts}
+        snapshots = {
+            row.id: row
+            for row in self._session.scalars(
+                select(models.OriginalSnapshotModel).where(
+                    models.OriginalSnapshotModel.id.in_(snapshot_ids)
+                )
+            ).all()
+        }
+        source_node_ids = {
+            artifact.source_node_id
+            for artifact in artifacts
+            if artifact.source_node_id is not None
+        }
+        source_nodes = {
+            row.id: row
+            for row in self._session.scalars(
+                select(models.NodeModel).where(models.NodeModel.id.in_(source_node_ids))
+            ).all()
+        }
+        rows: list[dict] = []
+        for artifact in artifacts:
+            snapshot = snapshots.get(artifact.snapshot_id)
+            if snapshot is None:
+                raise EntityNotFoundError(
+                    f"snapshot not found: {artifact.snapshot_id}"
+                )
+            if snapshot.project_id != artifact.project_id:
+                raise InvariantViolationError(
+                    "original artifact and snapshot must belong to the same project"
+                )
+            if artifact.source_node_id is not None:
+                node = source_nodes.get(artifact.source_node_id)
+                if node is None:
+                    raise EntityNotFoundError(
+                        f"source node not found: {artifact.source_node_id}"
+                    )
+                if node.project_id != artifact.project_id:
+                    raise InvariantViolationError(
+                        "original artifact and source node must belong to the same project"
+                    )
+            rows.append(
+                {
+                    "id": artifact.id,
+                    "project_id": artifact.project_id,
+                    "snapshot_id": artifact.snapshot_id,
+                    "source_node_id": artifact.source_node_id,
+                    "storage_key": artifact.storage_key,
+                    "size": artifact.size,
+                    "sha256": artifact.sha256,
+                    "observed_modified_at": artifact.observed_modified_at,
+                    "integrity_status": artifact.integrity_status,
+                    "created_at": artifact.created_at,
+                }
+            )
+        _write_batches(self._session, models.OriginalArtifactModel, rows)
+
     def get_original_artifact(
         self, artifact_id: str
     ) -> Optional[entities.OriginalArtifact]:
@@ -805,6 +875,105 @@ class SqlAlchemyImportRepository:
         )
         self._session.add(row)
         self._session.flush([row])
+
+    def add_snapshot_entries(
+        self, entries: Sequence[entities.OriginalSnapshotEntry]
+    ) -> None:
+        if not entries:
+            return
+        snapshot_ids = {entry.snapshot_id for entry in entries}
+        snapshots = {
+            row.id: row
+            for row in self._session.scalars(
+                select(models.OriginalSnapshotModel).where(
+                    models.OriginalSnapshotModel.id.in_(snapshot_ids)
+                )
+            ).all()
+        }
+        artifact_ids = {
+            entry.artifact_id for entry in entries if entry.artifact_id is not None
+        }
+        artifacts = {
+            row.id: row
+            for row in self._session.scalars(
+                select(models.OriginalArtifactModel).where(
+                    models.OriginalArtifactModel.id.in_(artifact_ids)
+                )
+            ).all()
+        }
+        by_id = {entry.id: entry for entry in entries}
+        if len(by_id) != len(entries):
+            raise InvariantViolationError("snapshot entry ids must be unique")
+        ordered: list[entities.OriginalSnapshotEntry] = []
+        pending = list(entries)
+        persisted_ids: set[str] = set()
+        while pending:
+            ready = [
+                entry
+                for entry in pending
+                if entry.parent_entry_id is None
+                or entry.parent_entry_id in persisted_ids
+            ]
+            if not ready:
+                raise InvariantViolationError(
+                    "snapshot entry hierarchy contains a missing parent or cycle"
+                )
+            ready_ids = {entry.id for entry in ready}
+            ordered.extend(ready)
+            persisted_ids.update(ready_ids)
+            pending = [entry for entry in pending if entry.id not in ready_ids]
+
+        rows: list[dict] = []
+        for entry in ordered:
+            snapshot = snapshots.get(entry.snapshot_id)
+            if snapshot is None:
+                raise EntityNotFoundError(f"snapshot not found: {entry.snapshot_id}")
+            if snapshot.project_id != entry.project_id:
+                raise InvariantViolationError(
+                    "snapshot entry and snapshot must belong to the same project"
+                )
+            if entry.parent_entry_id is not None:
+                parent = by_id.get(entry.parent_entry_id)
+                if parent is None:
+                    raise EntityNotFoundError(
+                        f"snapshot parent entry not found: {entry.parent_entry_id}"
+                    )
+                if (
+                    parent.project_id != entry.project_id
+                    or parent.snapshot_id != entry.snapshot_id
+                    or parent.kind != enums.OriginalSnapshotEntryKind.FOLDER
+                ):
+                    raise InvariantViolationError(
+                        "snapshot entry parent must be a folder in the same snapshot"
+                    )
+            if entry.artifact_id is not None:
+                artifact = artifacts.get(entry.artifact_id)
+                if artifact is None:
+                    raise EntityNotFoundError(
+                        f"original artifact not found: {entry.artifact_id}"
+                    )
+                if (
+                    artifact.project_id != entry.project_id
+                    or artifact.snapshot_id != entry.snapshot_id
+                ):
+                    raise InvariantViolationError(
+                        "snapshot entry artifact must belong to the same snapshot"
+                    )
+            rows.append(
+                {
+                    "id": entry.id,
+                    "project_id": entry.project_id,
+                    "snapshot_id": entry.snapshot_id,
+                    "parent_entry_id": entry.parent_entry_id,
+                    "artifact_id": entry.artifact_id,
+                    "source_node_id": entry.source_node_id,
+                    "kind": entry.kind,
+                    "original_name": entry.original_name,
+                    "ordinal": entry.ordinal,
+                    "created_at": entry.created_at,
+                }
+            )
+        _write_batches(self._session, models.OriginalSnapshotEntryModel, rows)
 
     def get_snapshot_entry(
         self, entry_id: str
@@ -1278,6 +1447,102 @@ class SqlAlchemyWorkspaceRepository:
         self._session.flush([item_row])
         self._session.add(placement_row)
         self._session.flush([placement_row])
+
+    def add_items(
+        self,
+        items: Sequence[
+            tuple[entities.WorkspaceItem, entities.WorkspacePlacement]
+        ],
+        *,
+        allow_container_parent: bool = False,
+    ) -> None:
+        if not items:
+            return
+        item_by_id = {item.id: item for item, _placement in items}
+        if len(item_by_id) != len(items):
+            raise InvariantViolationError("workspace item ids must be unique")
+        external_parent_ids = {
+            placement.parent_workspace_item_id
+            for _item, placement in items
+            if placement.parent_workspace_item_id is not None
+            and placement.parent_workspace_item_id not in item_by_id
+        }
+        external_parents = {
+            parent_id: self._require_parent(
+                next(
+                    item.project_id
+                    for item, placement in items
+                    if placement.parent_workspace_item_id == parent_id
+                ),
+                parent_id,
+                allow_container_view=allow_container_parent,
+            )
+            for parent_id in external_parent_ids
+        }
+        allowed_parent_kinds = {enums.WorkspaceItemKind.FOLDER}
+        if allow_container_parent:
+            allowed_parent_kinds.add(enums.WorkspaceItemKind.CONTAINER_VIEW)
+        item_rows: list[dict] = []
+        placement_rows: list[dict] = []
+        for item, placement in items:
+            if (
+                placement.workspace_item_id != item.id
+                or placement.project_id != item.project_id
+            ):
+                raise InvariantViolationError(
+                    "workspace item and placement identity must match"
+                )
+            parent_id = placement.parent_workspace_item_id
+            if parent_id is not None:
+                parent = item_by_id.get(parent_id) or external_parents.get(parent_id)
+                if parent is None:
+                    raise EntityNotFoundError(
+                        f"workspace parent not found: {parent_id}"
+                    )
+                if parent.project_id != item.project_id:
+                    raise InvariantViolationError(
+                        "workspace placement cannot cross projects"
+                    )
+                if parent.lifecycle_status != enums.WorkspaceItemLifecycleStatus.ACTIVE:
+                    raise InvariantViolationError("workspace parent must be active")
+                if parent.item_kind not in allowed_parent_kinds:
+                    raise InvariantViolationError(
+                        "workspace parent must be an ordinary folder"
+                    )
+            if item.item_kind != enums.WorkspaceItemKind.FILE and (
+                item.materialization_status
+                != enums.WorkspaceMaterializationStatus.VIRTUAL
+            ):
+                raise InvariantViolationError(
+                    "folders and container views must remain virtual in V1"
+                )
+            item_rows.append(
+                {
+                    "id": item.id,
+                    "project_id": item.project_id,
+                    "origin_source_node_id": item.origin_source_node_id,
+                    "item_kind": item.item_kind,
+                    "display_name": item.display_name,
+                    "lifecycle_status": item.lifecycle_status,
+                    "materialization_status": item.materialization_status,
+                    "created_at": item.created_at,
+                    "updated_at": item.updated_at,
+                    "deleted_at": item.deleted_at,
+                }
+            )
+            placement_rows.append(
+                {
+                    "workspace_item_id": placement.workspace_item_id,
+                    "project_id": placement.project_id,
+                    "parent_workspace_item_id": placement.parent_workspace_item_id,
+                    "ordinal": placement.ordinal,
+                    "previous_parent_id": placement.previous_parent_id,
+                    "previous_ordinal": placement.previous_ordinal,
+                    "updated_at": placement.updated_at,
+                }
+            )
+        _write_batches(self._session, models.WorkspaceItemModel, item_rows)
+        _write_batches(self._session, models.WorkspacePlacementModel, placement_rows)
 
     def get_item(self, item_id: str) -> Optional[entities.WorkspaceItem]:
         row = self._session.get(models.WorkspaceItemModel, item_id)

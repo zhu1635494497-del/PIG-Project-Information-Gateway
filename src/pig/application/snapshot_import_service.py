@@ -612,34 +612,36 @@ class SnapshotImportService:
                 OriginalSnapshotStatus.COPYING,
                 OriginalSnapshotStatus.VERIFYING,
             )
-            for value in captured.artifacts:
-                uow.imports.add_original_artifact(
-                    OriginalArtifact(
-                        id=value.id,
-                        project_id=project_id,
-                        snapshot_id=snapshot_id,
-                        storage_key=value.storage_key,
-                        size=value.size,
-                        sha256=value.sha256,
-                        observed_modified_at=value.observed_modified_at,
-                        integrity_status=ArtifactIntegrityStatus.VERIFIED,
-                        created_at=now,
-                    )
+            artifacts = tuple(
+                OriginalArtifact(
+                    id=value.id,
+                    project_id=project_id,
+                    snapshot_id=snapshot_id,
+                    storage_key=value.storage_key,
+                    size=value.size,
+                    sha256=value.sha256,
+                    observed_modified_at=value.observed_modified_at,
+                    integrity_status=ArtifactIntegrityStatus.VERIFIED,
+                    created_at=now,
                 )
-            for value in captured.entries:
-                uow.imports.add_snapshot_entry(
-                    OriginalSnapshotEntry(
-                        id=value.id,
-                        project_id=project_id,
-                        snapshot_id=snapshot_id,
-                        parent_entry_id=value.parent_entry_id,
-                        artifact_id=value.artifact_id,
-                        kind=value.kind,
-                        original_name=value.original_name,
-                        ordinal=value.ordinal,
-                        created_at=value.created_at,
-                    )
+                for value in captured.artifacts
+            )
+            uow.imports.add_original_artifacts(artifacts)
+            entries = tuple(
+                OriginalSnapshotEntry(
+                    id=value.id,
+                    project_id=project_id,
+                    snapshot_id=snapshot_id,
+                    parent_entry_id=value.parent_entry_id,
+                    artifact_id=value.artifact_id,
+                    kind=value.kind,
+                    original_name=value.original_name,
+                    ordinal=value.ordinal,
+                    created_at=value.created_at,
                 )
+                for value in captured.entries
+            )
+            uow.imports.add_snapshot_entries(entries)
             source = Source(
                 id=source_id,
                 project_id=project_id,

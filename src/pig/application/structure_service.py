@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Callable, Optional
@@ -455,6 +455,12 @@ class WorkbenchStructureService:
 
             workspace_ids: dict[str, str] = {}
             next_child_ordinal: dict[str, int] = {}
+            registered_children: list[tuple[Node, NodeRelationship]] = []
+            entry_locators: list[SourceEntryLocator] = []
+            metadata_values: list[NodeMetadata] = []
+            attempts: list[ProcessingAttempt] = []
+            workspace_items: list[tuple[WorkspaceItem, WorkspacePlacement]] = []
+            buffered_events: list[ProcessingEvent] = []
             for plan_index, plan in enumerate(plans):
                 for planned in plan.nodes:
                     node = planned.node
@@ -484,19 +490,9 @@ class WorkbenchStructureService:
                             created_by_job_id=job_id,
                             created_at=now,
                         )
-                        initial = replace(
-                            node, status=NodeProcessingStatus.DISCOVERED
-                        )
-                        uow.catalog.register_child(initial, relationship)
-                        self._advance_node(
-                            uow,
-                            node.id,
-                            NodeProcessingStatus.DISCOVERED,
-                            node.status,
-                            now,
-                        )
+                        registered_children.append((node, relationship))
                         if planned.locator_kind is not None:
-                            uow.catalog.add_entry_locator(
+                            entry_locators.append(
                                 SourceEntryLocator(
                                     relationship_id=relationship.id,
                                     project_id=project_id,
@@ -509,19 +505,20 @@ class WorkbenchStructureService:
                                     created_at=now,
                                 )
                             )
-                        self._event(
-                            uow,
-                            EventType.RELATIONSHIP_CREATED,
-                            project_id,
-                            actor,
-                            correlation_id,
-                            job_id=job_id,
-                            source_id=plan.source.id,
-                            node_id=node.id,
-                            details={"relationship_id": relationship.id},
+                        buffered_events.append(
+                            self._make_event(
+                                EventType.RELATIONSHIP_CREATED,
+                                project_id,
+                                actor,
+                                correlation_id,
+                                job_id=job_id,
+                                source_id=plan.source.id,
+                                node_id=node.id,
+                                details={"relationship_id": relationship.id},
+                            )
                         )
                     for descriptor in planned.metadata:
-                        uow.catalog.add_metadata(
+                        metadata_values.append(
                             NodeMetadata(
                                 id=self._new_id(),
                                 project_id=project_id,
@@ -540,22 +537,26 @@ class WorkbenchStructureService:
                                 observed_at=now,
                             )
                         )
-                    attempt_id = self._persist_attempt(
-                        uow,
+                    attempt, attempt_events = self._build_attempt(
                         planned,
                         actor=actor,
                         correlation_id=correlation_id,
                         job_id=job_id,
                         now=now,
                     )
-                    self._node_events(
-                        uow,
-                        planned,
-                        plan.source,
-                        actor,
-                        correlation_id,
-                        job_id,
-                        attempt_id=attempt_id,
+                    attempt_id = None if attempt is None else attempt.id
+                    if attempt is not None:
+                        attempts.append(attempt)
+                    buffered_events.extend(attempt_events)
+                    buffered_events.extend(
+                        self._build_node_events(
+                            planned,
+                            plan.source,
+                            actor,
+                            correlation_id,
+                            job_id,
+                            attempt_id=attempt_id,
+                        )
                     )
 
                     item_id = self._new_id()
@@ -571,45 +572,56 @@ class WorkbenchStructureService:
                         workspace_ordinal = next_child_ordinal.get(parent_item_id, 0)
                         next_child_ordinal[parent_item_id] = workspace_ordinal + 1
                     item_kind = self._workspace_kind(node)
-                    uow.workspace.add_item(
-                        WorkspaceItem(
-                            id=item_id,
-                            project_id=project_id,
-                            origin_source_node_id=node.id,
-                            item_kind=item_kind,
-                            display_name=node.display_name,
-                            lifecycle_status=WorkspaceItemLifecycleStatus.ACTIVE,
-                            materialization_status=WorkspaceMaterializationStatus.VIRTUAL,
-                            created_at=now,
-                            updated_at=now,
-                        ),
-                        WorkspacePlacement(
-                            workspace_item_id=item_id,
-                            project_id=project_id,
-                            parent_workspace_item_id=parent_item_id,
-                            ordinal=workspace_ordinal,
-                            updated_at=now,
-                        ),
-                        allow_container_parent=True,
+                    workspace_items.append(
+                        (
+                            WorkspaceItem(
+                                id=item_id,
+                                project_id=project_id,
+                                origin_source_node_id=node.id,
+                                item_kind=item_kind,
+                                display_name=node.display_name,
+                                lifecycle_status=WorkspaceItemLifecycleStatus.ACTIVE,
+                                materialization_status=WorkspaceMaterializationStatus.VIRTUAL,
+                                created_at=now,
+                                updated_at=now,
+                            ),
+                            WorkspacePlacement(
+                                workspace_item_id=item_id,
+                                project_id=project_id,
+                                parent_workspace_item_id=parent_item_id,
+                                ordinal=workspace_ordinal,
+                                updated_at=now,
+                            ),
+                        )
                     )
                     workspace_count += 1
-                    self._event(
-                        uow,
-                        EventType.WORKSPACE_ITEM_ADDED,
-                        project_id,
-                        actor,
-                        correlation_id,
-                        job_id=job_id,
-                        source_id=plan.source.id,
-                        node_id=node.id,
-                        workspace_item_id=item_id,
-                        details={
-                            "initial_projection": True,
-                            "item_kind": item_kind.value,
-                            "parent_workspace_item_id": parent_item_id,
-                            "ordinal": workspace_ordinal,
-                        },
+                    buffered_events.append(
+                        self._make_event(
+                            EventType.WORKSPACE_ITEM_ADDED,
+                            project_id,
+                            actor,
+                            correlation_id,
+                            job_id=job_id,
+                            source_id=plan.source.id,
+                            node_id=node.id,
+                            workspace_item_id=item_id,
+                            details={
+                                "initial_projection": True,
+                                "item_kind": item_kind.value,
+                                "parent_workspace_item_id": parent_item_id,
+                                "ordinal": workspace_ordinal,
+                            },
+                        )
                     )
+
+            uow.catalog.register_children(registered_children)
+            uow.catalog.add_entry_locators(entry_locators)
+            uow.catalog.add_metadata_many(metadata_values)
+            uow.processing.add_attempts(attempts)
+            uow.workspace.add_items(
+                workspace_items, allow_container_parent=True
+            )
+            uow.processing.append_events(buffered_events)
 
             if workspace_count:
                 expected_revision = (
@@ -1575,78 +1587,19 @@ class WorkbenchStructureService:
             node_id, NodeProcessingStatus.PROCESSING, final, now
         )
 
-    def _persist_attempt(
+    def _build_attempt(
         self,
-        uow,
         planned: _PlannedNode,
         *,
         actor: str,
         correlation_id: str,
         job_id: str,
         now: datetime,
-    ) -> Optional[str]:
+    ) -> tuple[Optional[ProcessingAttempt], list[ProcessingEvent]]:
         identity = planned.backend_identity
         if identity is None:
-            return None
+            return None, []
         attempt_id = self._new_id()
-        attempt_number = uow.processing.next_attempt_number(planned.node.id)
-        uow.processing.add_attempt(
-            ProcessingAttempt(
-                id=attempt_id,
-                project_id=planned.node.project_id,
-                job_id=job_id,
-                node_id=planned.node.id,
-                attempt_number=attempt_number,
-                status=AttemptStatus.QUEUED,
-                stage=ProcessingStage.INSPECT_CONTAINER,
-                queued_at=now,
-            )
-        )
-        self._event(
-            uow,
-            EventType.ATTEMPT_QUEUED,
-            planned.node.project_id,
-            actor,
-            correlation_id,
-            node_id=planned.node.id,
-            job_id=job_id,
-            attempt_id=attempt_id,
-            new_status=AttemptStatus.QUEUED.value,
-        )
-        uow.processing.update_attempt_status(
-            attempt_id,
-            AttemptStatus.QUEUED,
-            AttemptStatus.RUNNING,
-            handler_name=identity.handler_name,
-            handler_version=identity.handler_version,
-            backend_name=identity.backend_name,
-            backend_version=identity.backend_version,
-            backend_sha256=identity.backend_sha256,
-            started_at=now,
-        )
-        self._event(
-            uow,
-            EventType.ATTEMPT_STARTED,
-            planned.node.project_id,
-            actor,
-            correlation_id,
-            node_id=planned.node.id,
-            job_id=job_id,
-            attempt_id=attempt_id,
-            previous_status=AttemptStatus.QUEUED.value,
-            new_status=AttemptStatus.RUNNING.value,
-            details={
-                "handler_name": identity.handler_name,
-                "handler_version": identity.handler_version,
-                "backend_name": identity.backend_name,
-                "backend_version": identity.backend_version,
-                **(
-                    {}
-                    if identity.backend_sha256 is None
-                    else {"backend_sha256": identity.backend_sha256}
-                ),
-            },
-        )
         successful = planned.node.status in _USABLE
         final = AttemptStatus.COMPLETED if successful else AttemptStatus.FAILED
         error = None
@@ -1658,32 +1611,76 @@ class WorkbenchStructureService:
                 message=planned.error_message or "container inspection did not succeed",
                 retryable=planned.error_retryable,
             )
-        uow.processing.update_attempt_status(
-            attempt_id,
-            AttemptStatus.RUNNING,
-            final,
+        attempt = ProcessingAttempt(
+            id=attempt_id,
+            project_id=planned.node.project_id,
+            job_id=job_id,
+            node_id=planned.node.id,
+            attempt_number=1,
+            status=final,
+            stage=ProcessingStage.INSPECT_CONTAINER,
+            handler_name=identity.handler_name,
+            handler_version=identity.handler_version,
+            backend_name=identity.backend_name,
+            backend_version=identity.backend_version,
+            backend_sha256=identity.backend_sha256,
+            queued_at=now,
+            started_at=now,
             finished_at=now,
             error=error,
         )
-        self._event(
-            uow,
-            EventType.ATTEMPT_FINISHED if successful else EventType.ATTEMPT_FAILED,
-            planned.node.project_id,
-            actor,
-            correlation_id,
-            node_id=planned.node.id,
-            job_id=job_id,
-            attempt_id=attempt_id,
-            severity=EventSeverity.INFO if successful else EventSeverity.ERROR,
-            previous_status=AttemptStatus.RUNNING.value,
-            new_status=final.value,
-            error_code=None if error is None else error.code,
-        )
-        return attempt_id
+        return attempt, [
+            self._make_event(
+                EventType.ATTEMPT_QUEUED,
+                planned.node.project_id,
+                actor,
+                correlation_id,
+                node_id=planned.node.id,
+                job_id=job_id,
+                attempt_id=attempt_id,
+                new_status=AttemptStatus.QUEUED.value,
+            ),
+            self._make_event(
+                EventType.ATTEMPT_STARTED,
+                planned.node.project_id,
+                actor,
+                correlation_id,
+                node_id=planned.node.id,
+                job_id=job_id,
+                attempt_id=attempt_id,
+                previous_status=AttemptStatus.QUEUED.value,
+                new_status=AttemptStatus.RUNNING.value,
+                details={
+                    "handler_name": identity.handler_name,
+                    "handler_version": identity.handler_version,
+                    "backend_name": identity.backend_name,
+                    "backend_version": identity.backend_version,
+                    **(
+                        {}
+                        if identity.backend_sha256 is None
+                        else {"backend_sha256": identity.backend_sha256}
+                    ),
+                },
+            ),
+            self._make_event(
+                EventType.ATTEMPT_FINISHED
+                if successful
+                else EventType.ATTEMPT_FAILED,
+                planned.node.project_id,
+                actor,
+                correlation_id,
+                node_id=planned.node.id,
+                job_id=job_id,
+                attempt_id=attempt_id,
+                severity=EventSeverity.INFO if successful else EventSeverity.ERROR,
+                previous_status=AttemptStatus.RUNNING.value,
+                new_status=final.value,
+                error_code=None if error is None else error.code,
+            ),
+        ]
 
-    def _node_events(
+    def _build_node_events(
         self,
-        uow,
         planned,
         source,
         actor,
@@ -1691,12 +1688,27 @@ class WorkbenchStructureService:
         job_id,
         *,
         attempt_id=None,
-    ) -> None:
+    ) -> list[ProcessingEvent]:
         node = planned.node
+        events: list[ProcessingEvent] = []
         if planned.parent_node_id is not None:
-            self._event(
-                uow,
-                EventType.CHILD_DISCOVERED,
+            events.append(
+                self._make_event(
+                    EventType.CHILD_DISCOVERED,
+                    node.project_id,
+                    actor,
+                    correlation,
+                    job_id=job_id,
+                    source_id=source.id,
+                    node_id=node.id,
+                    attempt_id=attempt_id,
+                    new_status=NodeProcessingStatus.DISCOVERED.value,
+                    details={"ordinal": planned.relationship_ordinal},
+                )
+            )
+        events.append(
+            self._make_event(
+                EventType.NODE_FORMAT_DETECTED,
                 node.project_id,
                 actor,
                 correlation,
@@ -1704,44 +1716,33 @@ class WorkbenchStructureService:
                 source_id=source.id,
                 node_id=node.id,
                 attempt_id=attempt_id,
-                new_status=NodeProcessingStatus.DISCOVERED.value,
-                details={"ordinal": planned.relationship_ordinal},
+                details={"format": node.format.value, "method": node.detection_method},
             )
-        self._event(
-            uow,
-            EventType.NODE_FORMAT_DETECTED,
-            node.project_id,
-            actor,
-            correlation,
-            job_id=job_id,
-            source_id=source.id,
-            node_id=node.id,
-            attempt_id=attempt_id,
-            details={"format": node.format.value, "method": node.detection_method},
         )
         if node.kind == NodeKind.CONTAINER and node.status in _USABLE:
-            self._event(
-                uow,
-                EventType.CONTAINER_OPENED,
-                node.project_id,
-                actor,
-                correlation,
-                job_id=job_id,
-                source_id=source.id,
-                node_id=node.id,
-                details={
-                    "handler": (
-                        None
-                        if planned.backend_identity is None
-                        else planned.backend_identity.handler_name
-                    ),
-                    "backend": (
-                        None
-                        if planned.backend_identity is None
-                        else planned.backend_identity.backend_name
-                    ),
-                },
-                attempt_id=attempt_id,
+            events.append(
+                self._make_event(
+                    EventType.CONTAINER_OPENED,
+                    node.project_id,
+                    actor,
+                    correlation,
+                    job_id=job_id,
+                    source_id=source.id,
+                    node_id=node.id,
+                    details={
+                        "handler": (
+                            None
+                            if planned.backend_identity is None
+                            else planned.backend_identity.handler_name
+                        ),
+                        "backend": (
+                            None
+                            if planned.backend_identity is None
+                            else planned.backend_identity.backend_name
+                        ),
+                    },
+                    attempt_id=attempt_id,
+                )
             )
         event_type = (
             EventType.NODE_PROCESSING_FINISHED
@@ -1750,26 +1751,28 @@ class WorkbenchStructureService:
             if node.status in _ERROR
             else EventType.NODE_PROCESSING_BLOCKED
         )
-        self._event(
-            uow,
-            event_type,
-            node.project_id,
-            actor,
-            correlation,
-            job_id=job_id,
-            source_id=source.id,
-            node_id=node.id,
-            attempt_id=attempt_id,
-            severity=(
-                EventSeverity.INFO
-                if node.status == NodeProcessingStatus.SUCCESS
-                else EventSeverity.ERROR
-                if node.status in _ERROR
-                else EventSeverity.WARNING
-            ),
-            new_status=node.status.value,
-            error_code=planned.error_code,
+        events.append(
+            self._make_event(
+                event_type,
+                node.project_id,
+                actor,
+                correlation,
+                job_id=job_id,
+                source_id=source.id,
+                node_id=node.id,
+                attempt_id=attempt_id,
+                severity=(
+                    EventSeverity.INFO
+                    if node.status == NodeProcessingStatus.SUCCESS
+                    else EventSeverity.ERROR
+                    if node.status in _ERROR
+                    else EventSeverity.WARNING
+                ),
+                new_status=node.status.value,
+                error_code=planned.error_code,
+            )
         )
+        return events
 
     @staticmethod
     def _relationship_chain(uow, root_id: str, target_id: str):
@@ -1911,18 +1914,41 @@ class WorkbenchStructureService:
         **links,
     ) -> None:
         uow.processing.append_event(
-            ProcessingEvent(
-                id=self._new_id(),
-                event_type=event_type,
-                project_id=project_id,
-                actor=actor,
-                occurred_at=self._clock(),
+            self._make_event(
+                event_type,
+                project_id,
+                actor,
+                correlation_id,
                 severity=severity,
-                correlation_id=correlation_id,
                 error_code=error_code,
-                details={} if details is None else details,
+                details=details,
                 **links,
             )
+        )
+
+    def _make_event(
+        self,
+        event_type,
+        project_id,
+        actor,
+        correlation_id,
+        *,
+        severity=EventSeverity.INFO,
+        error_code=None,
+        details=None,
+        **links,
+    ) -> ProcessingEvent:
+        return ProcessingEvent(
+            id=self._new_id(),
+            event_type=event_type,
+            project_id=project_id,
+            actor=actor,
+            occurred_at=self._clock(),
+            severity=severity,
+            correlation_id=correlation_id,
+            error_code=error_code,
+            details={} if details is None else details,
+            **links,
         )
 
     @staticmethod

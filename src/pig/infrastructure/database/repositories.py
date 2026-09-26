@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Iterable, Optional, Sequence
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, insert, or_, select, update
 from sqlalchemy.orm import Session
 
 from pig.domain import entities, enums
@@ -14,6 +14,14 @@ from pig.domain.exceptions import (
 )
 from pig.domain.transitions import require_project_transition, require_source_transition
 from pig.infrastructure.database import models
+
+
+_WRITE_BATCH_SIZE = 1_000
+
+
+def _write_batches(session: Session, model, rows: Sequence[dict]) -> None:
+    for start in range(0, len(rows), _WRITE_BATCH_SIZE):
+        session.execute(insert(model), rows[start : start + _WRITE_BATCH_SIZE])
 
 
 def _project_from_model(row: models.ProjectModel) -> entities.Project:
@@ -512,6 +520,157 @@ class SqlAlchemyCatalogRepository:
         )
         self._add_lineage(records)
 
+    def register_children(
+        self,
+        children: Sequence[tuple[entities.Node, entities.NodeRelationship]],
+    ) -> None:
+        if not children:
+            return
+        node_by_id = {node.id: node for node, _relationship in children}
+        if len(node_by_id) != len(children):
+            raise InvariantViolationError("registered child node ids must be unique")
+        relationship_ids = {relationship.id for _node, relationship in children}
+        if len(relationship_ids) != len(children):
+            raise InvariantViolationError("node relationship ids must be unique")
+        external_parent_ids = {
+            relationship.parent_node_id
+            for _node, relationship in children
+            if relationship.parent_node_id not in node_by_id
+        }
+        external_parents = {
+            row.id: row
+            for row in self._session.scalars(
+                select(models.NodeModel).where(
+                    models.NodeModel.id.in_(external_parent_ids)
+                )
+            ).all()
+        }
+        missing_parents = external_parent_ids.difference(external_parents)
+        if missing_parents:
+            raise EntityNotFoundError(
+                f"parent node not found: {sorted(missing_parents)[0]}"
+            )
+        existing_lineage: dict[str, list[tuple[str, int]]] = {}
+        if external_parent_ids:
+            for row in self._session.scalars(
+                select(models.LineageRecordModel).where(
+                    models.LineageRecordModel.descendant_node_id.in_(
+                        external_parent_ids
+                    )
+                )
+            ).all():
+                existing_lineage.setdefault(row.descendant_node_id, []).append(
+                    (row.ancestor_node_id, row.distance)
+                )
+
+        allowed_relationships = {
+            enums.NodeFormat.FOLDER: {enums.RelationshipType.FOLDER_CONTAINS},
+            enums.NodeFormat.ZIP: {enums.RelationshipType.ARCHIVE_ENTRY},
+            enums.NodeFormat.RAR: {enums.RelationshipType.ARCHIVE_ENTRY},
+            enums.NodeFormat.SEVEN_Z: {enums.RelationshipType.ARCHIVE_ENTRY},
+            enums.NodeFormat.MSG: {
+                enums.RelationshipType.EMAIL_ATTACHMENT,
+                enums.RelationshipType.EMBEDDED_MESSAGE,
+            },
+            enums.NodeFormat.EML: {
+                enums.RelationshipType.EMAIL_ATTACHMENT,
+                enums.RelationshipType.EMBEDDED_MESSAGE,
+            },
+        }
+        ordered = sorted(children, key=lambda value: (value[0].depth, value[0].id))
+        lineage_by_descendant = dict(existing_lineage)
+        node_rows: list[dict] = []
+        relationship_rows: list[dict] = []
+        lineage_rows: list[dict] = []
+        for node, relationship in ordered:
+            if relationship.child_node_id != node.id:
+                raise InvariantViolationError(
+                    "relationship child must be the registered node"
+                )
+            if relationship.project_id != node.project_id:
+                raise InvariantViolationError(
+                    "relationship and child must share a project"
+                )
+            parent = node_by_id.get(relationship.parent_node_id)
+            if parent is None:
+                parent = external_parents[relationship.parent_node_id]
+            if parent.project_id != node.project_id or parent.source_id != node.source_id:
+                raise InvariantViolationError(
+                    "structural relationship cannot cross sources or projects"
+                )
+            if parent.kind != enums.NodeKind.CONTAINER:
+                raise InvariantViolationError("structural parent must be a container")
+            if relationship.type not in allowed_relationships.get(parent.format, set()):
+                raise InvariantViolationError(
+                    "relationship type is incompatible with the parent format"
+                )
+            if node.depth != parent.depth + 1:
+                raise InvariantViolationError(
+                    "child depth must equal parent depth plus one"
+                )
+            parent_lineage = lineage_by_descendant.get(parent.id, [])
+            if not any(
+                ancestor_id == parent.id and distance == 0
+                for ancestor_id, distance in parent_lineage
+            ):
+                raise InvariantViolationError("parent lineage is incomplete")
+            child_lineage = [(node.id, 0)] + [
+                (ancestor_id, distance + 1)
+                for ancestor_id, distance in parent_lineage
+            ]
+            lineage_by_descendant[node.id] = child_lineage
+            node_rows.append(
+                {
+                    "id": node.id,
+                    "project_id": node.project_id,
+                    "source_id": node.source_id,
+                    "kind": node.kind,
+                    "format": node.format,
+                    "original_name": node.original_name,
+                    "display_name": node.display_name,
+                    "logical_path": node.logical_path,
+                    "depth": node.depth,
+                    "media_type": node.media_type,
+                    "declared_size": node.declared_size,
+                    "status": node.status,
+                    "detection_method": node.detection_method,
+                    "detection_confidence": node.detection_confidence,
+                    "detection_details": dict(node.detection_details),
+                    "discovery_key": node.discovery_key,
+                    "created_at": node.created_at,
+                    "updated_at": node.updated_at,
+                }
+            )
+            relationship_rows.append(
+                {
+                    "id": relationship.id,
+                    "project_id": relationship.project_id,
+                    "source_id": node.source_id,
+                    "parent_node_id": relationship.parent_node_id,
+                    "child_node_id": relationship.child_node_id,
+                    "type": relationship.type,
+                    "ordinal": relationship.ordinal,
+                    "discovery_key": relationship.discovery_key,
+                    "created_by_job_id": relationship.created_by_job_id,
+                    "created_at": relationship.created_at,
+                }
+            )
+            lineage_rows.extend(
+                {
+                    "project_id": node.project_id,
+                    "source_id": node.source_id,
+                    "ancestor_node_id": ancestor_id,
+                    "descendant_node_id": node.id,
+                    "distance": distance,
+                }
+                for ancestor_id, distance in child_lineage
+            )
+        _write_batches(self._session, models.NodeModel, node_rows)
+        _write_batches(
+            self._session, models.NodeRelationshipModel, relationship_rows
+        )
+        _write_batches(self._session, models.LineageRecordModel, lineage_rows)
+
     def get_node(self, node_id: str) -> Optional[entities.Node]:
         row = self._session.get(models.NodeModel, node_id)
         return None if row is None else _node_from_model(row)
@@ -849,6 +1008,93 @@ class SqlAlchemyCatalogRepository:
         self._session.add(row)
         self._session.flush([row])
 
+    def add_entry_locators(
+        self, locators: Sequence[entities.SourceEntryLocator]
+    ) -> None:
+        if not locators:
+            return
+        relationship_ids = {locator.relationship_id for locator in locators}
+        relationships = {
+            row.id: row
+            for row in self._session.scalars(
+                select(models.NodeRelationshipModel).where(
+                    models.NodeRelationshipModel.id.in_(relationship_ids)
+                )
+            ).all()
+        }
+        snapshot_entry_ids = {
+            locator.snapshot_entry_id
+            for locator in locators
+            if locator.snapshot_entry_id is not None
+        }
+        snapshot_entries = {
+            row.id: row
+            for row in self._session.scalars(
+                select(models.OriginalSnapshotEntryModel).where(
+                    models.OriginalSnapshotEntryModel.id.in_(snapshot_entry_ids)
+                )
+            ).all()
+        }
+        rows: list[dict] = []
+        for locator in locators:
+            relationship = relationships.get(locator.relationship_id)
+            if relationship is None:
+                raise EntityNotFoundError(
+                    f"relationship not found: {locator.relationship_id}"
+                )
+            if (
+                relationship.project_id != locator.project_id
+                or relationship.child_node_id != locator.child_node_id
+            ):
+                raise InvariantViolationError(
+                    "entry locator must identify its relationship child"
+                )
+            if locator.kind == enums.MaterializationLocatorKind.SNAPSHOT_ENTRY:
+                entry = snapshot_entries.get(locator.snapshot_entry_id)
+                if entry is None:
+                    raise EntityNotFoundError(
+                        f"snapshot entry not found: {locator.snapshot_entry_id}"
+                    )
+                if entry.project_id != locator.project_id:
+                    raise InvariantViolationError(
+                        "snapshot entry locator cannot cross projects"
+                    )
+                if any(
+                    value is not None
+                    for value in (
+                        locator.member_ordinal,
+                        locator.expected_name,
+                        locator.member_role,
+                    )
+                ):
+                    raise InvariantViolationError(
+                        "snapshot entry locator cannot include container-member fields"
+                    )
+            elif (
+                locator.snapshot_entry_id is not None
+                or locator.member_ordinal is None
+                or locator.member_ordinal < 0
+                or not locator.expected_name
+                or not locator.member_role
+            ):
+                raise InvariantViolationError(
+                    "container locator requires ordinal, expected name, and member role"
+                )
+            rows.append(
+                {
+                    "relationship_id": locator.relationship_id,
+                    "project_id": locator.project_id,
+                    "child_node_id": locator.child_node_id,
+                    "kind": locator.kind,
+                    "snapshot_entry_id": locator.snapshot_entry_id,
+                    "member_ordinal": locator.member_ordinal,
+                    "expected_name": locator.expected_name,
+                    "member_role": locator.member_role,
+                    "created_at": locator.created_at,
+                }
+            )
+        _write_batches(self._session, models.SourceEntryLocatorModel, rows)
+
     def entry_locator_for_relationship(
         self, relationship_id: str
     ) -> Optional[entities.SourceEntryLocator]:
@@ -933,6 +1179,31 @@ class SqlAlchemyCatalogRepository:
         )
         self._session.add(row)
         self._session.flush([row])
+
+    def add_metadata_many(
+        self, metadata: Sequence[entities.NodeMetadata]
+    ) -> None:
+        rows = [
+            {
+                "id": value.id,
+                "project_id": value.project_id,
+                "node_id": value.node_id,
+                "namespace": value.namespace,
+                "key": value.key,
+                "value_type": value.value_type,
+                "value_text": value.value_text,
+                "value_integer": value.value_integer,
+                "value_real": value.value_real,
+                "value_boolean": value.value_boolean,
+                "value_datetime": value.value_datetime,
+                "value_json": value.value_json,
+                "provenance": value.provenance,
+                "observed_at": value.observed_at,
+                "created_at": value.created_at,
+            }
+            for value in metadata
+        ]
+        _write_batches(self._session, models.NodeMetadataModel, rows)
 
     def metadata_for_node(self, node_id: str) -> Sequence[entities.NodeMetadata]:
         rows = self._session.scalars(
@@ -1077,6 +1348,41 @@ class SqlAlchemyProcessingRepository:
         self._session.add(row)
         self._session.flush([row])
 
+    def add_attempts(
+        self, attempts: Sequence[entities.ProcessingAttempt]
+    ) -> None:
+        rows: list[dict] = []
+        for attempt in attempts:
+            error = attempt.error
+            rows.append(
+                {
+                    "id": attempt.id,
+                    "project_id": attempt.project_id,
+                    "job_id": attempt.job_id,
+                    "node_id": attempt.node_id,
+                    "attempt_number": attempt.attempt_number,
+                    "status": attempt.status,
+                    "stage": attempt.stage,
+                    "handler_name": attempt.handler_name,
+                    "handler_version": attempt.handler_version,
+                    "backend_name": attempt.backend_name,
+                    "backend_version": attempt.backend_version,
+                    "backend_sha256": attempt.backend_sha256,
+                    "queued_at": attempt.queued_at,
+                    "started_at": attempt.started_at,
+                    "finished_at": attempt.finished_at,
+                    "error_code": None if error is None else error.code,
+                    "error_category": None if error is None else error.category,
+                    "error_stage": None if error is None else error.stage,
+                    "error_message": None if error is None else error.message,
+                    "error_retryable": None if error is None else error.retryable,
+                    "technical_reference": (
+                        None if error is None else error.technical_reference
+                    ),
+                }
+            )
+        _write_batches(self._session, models.ProcessingAttemptModel, rows)
+
     def get_attempt(self, attempt_id: str) -> Optional[entities.ProcessingAttempt]:
         row = self._session.get(models.ProcessingAttemptModel, attempt_id)
         return None if row is None else _attempt_from_model(row)
@@ -1184,6 +1490,35 @@ class SqlAlchemyProcessingRepository:
         )
         self._session.add(row)
         self._session.flush([row])
+
+    def append_events(
+        self, events: Sequence[entities.ProcessingEvent]
+    ) -> None:
+        rows = [
+            {
+                "id": event.id,
+                "event_type": event.event_type,
+                "project_id": event.project_id,
+                "source_id": event.source_id,
+                "node_id": event.node_id,
+                "job_id": event.job_id,
+                "attempt_id": event.attempt_id,
+                "import_session_id": event.import_session_id,
+                "snapshot_id": event.snapshot_id,
+                "workspace_item_id": event.workspace_item_id,
+                "working_artifact_id": event.working_artifact_id,
+                "actor": event.actor,
+                "occurred_at": event.occurred_at,
+                "severity": event.severity,
+                "previous_status": event.previous_status,
+                "new_status": event.new_status,
+                "error_code": event.error_code,
+                "details": dict(event.details),
+                "correlation_id": event.correlation_id,
+            }
+            for event in events
+        ]
+        _write_batches(self._session, models.ProcessingEventModel, rows)
 
     def events_for_project(self, project_id: str) -> Sequence[entities.ProcessingEvent]:
         rows = self._session.scalars(
