@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional, Sequence
 
-from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, select, text
+from sqlalchemy.orm import Session, aliased
 
 from pig.domain import entities, enums
 from pig.domain.exceptions import (
@@ -22,6 +22,7 @@ from pig.domain.transitions import (
     require_workspace_materialization_transition,
 )
 from pig.infrastructure.database import models
+from pig.domain.repositories import WorkspaceReadRecord
 
 
 def _session_from_model(row: models.ImportSessionModel) -> entities.ImportSession:
@@ -176,6 +177,44 @@ def _working_revision_from_model(
         detected_at=row.detected_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
+    )
+
+
+def _node_from_model(row: models.NodeModel) -> entities.Node:
+    return entities.Node(
+        id=row.id,
+        project_id=row.project_id,
+        source_id=row.source_id,
+        kind=row.kind,
+        format=row.format,
+        original_name=row.original_name,
+        display_name=row.display_name,
+        logical_path=row.logical_path,
+        depth=row.depth,
+        media_type=row.media_type,
+        declared_size=row.declared_size,
+        status=row.status,
+        detection_method=row.detection_method,
+        detection_confidence=row.detection_confidence,
+        detection_details=dict(row.detection_details),
+        discovery_key=row.discovery_key,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _source_from_model(
+    row: models.SourceModel, root_node_id: Optional[str]
+) -> entities.Source:
+    return entities.Source(
+        id=row.id,
+        project_id=row.project_id,
+        snapshot_id=row.snapshot_id,
+        kind=row.kind,
+        display_name=row.display_name,
+        status=row.status,
+        created_at=row.created_at,
+        root_node_id=root_node_id,
     )
 
 
@@ -811,6 +850,287 @@ class SqlAlchemyImportRepository:
 class SqlAlchemyWorkspaceRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
+
+    @staticmethod
+    def _read_statement(project_id: str):
+        current_revision = aliased(models.WorkingRevisionModel)
+        previous_revision = aliased(models.WorkingRevisionModel)
+        statement = (
+            select(
+                models.WorkspaceItemModel,
+                models.WorkspacePlacementModel,
+                models.NodeModel,
+                models.SourceModel,
+                models.SourceRootModel.node_id,
+                models.WorkingArtifactModel,
+                current_revision,
+                previous_revision,
+            )
+            .join(
+                models.WorkspacePlacementModel,
+                models.WorkspacePlacementModel.workspace_item_id
+                == models.WorkspaceItemModel.id,
+            )
+            .outerjoin(
+                models.NodeModel,
+                models.NodeModel.id
+                == models.WorkspaceItemModel.origin_source_node_id,
+            )
+            .outerjoin(
+                models.SourceModel,
+                models.SourceModel.id == models.NodeModel.source_id,
+            )
+            .outerjoin(
+                models.SourceRootModel,
+                models.SourceRootModel.source_id == models.SourceModel.id,
+            )
+            .outerjoin(
+                models.WorkingArtifactModel,
+                models.WorkingArtifactModel.workspace_item_id
+                == models.WorkspaceItemModel.id,
+            )
+            .outerjoin(
+                current_revision,
+                (current_revision.working_artifact_id
+                 == models.WorkingArtifactModel.id)
+                & (
+                    current_revision.role
+                    == enums.WorkingRevisionRole.CURRENT_CHECKPOINT
+                ),
+            )
+            .outerjoin(
+                previous_revision,
+                (previous_revision.working_artifact_id
+                 == models.WorkingArtifactModel.id)
+                & (previous_revision.role == enums.WorkingRevisionRole.PREVIOUS),
+            )
+            .where(
+                models.WorkspaceItemModel.project_id == project_id,
+                models.WorkspaceItemModel.lifecycle_status
+                != enums.WorkspaceItemLifecycleStatus.PURGED,
+            )
+        )
+        return statement
+
+    def _path_index(
+        self, project_id: str
+    ) -> dict[
+        str,
+        tuple[str, bool, enums.WorkspaceItemLifecycleStatus],
+    ]:
+        rows = self._session.execute(
+            select(
+                models.WorkspaceItemModel.id,
+                models.WorkspaceItemModel.display_name,
+                models.WorkspaceItemModel.lifecycle_status,
+                models.WorkspacePlacementModel.parent_workspace_item_id,
+            )
+            .join(
+                models.WorkspacePlacementModel,
+                models.WorkspacePlacementModel.workspace_item_id
+                == models.WorkspaceItemModel.id,
+            )
+            .where(
+                models.WorkspaceItemModel.project_id == project_id,
+                models.WorkspaceItemModel.lifecycle_status
+                != enums.WorkspaceItemLifecycleStatus.PURGED,
+            )
+        ).all()
+        graph = {
+            item_id: (display_name, lifecycle_status, parent_id)
+            for item_id, display_name, lifecycle_status, parent_id in rows
+        }
+        resolved: dict[
+            str,
+            tuple[str, bool, enums.WorkspaceItemLifecycleStatus],
+        ] = {}
+        for item_id in graph:
+            if item_id in resolved:
+                continue
+            chain: list[
+                tuple[
+                    str,
+                    tuple[
+                        str,
+                        enums.WorkspaceItemLifecycleStatus,
+                        Optional[str],
+                    ],
+                ]
+            ] = []
+            visited: set[str] = set()
+            current: Optional[str] = item_id
+            while current is not None and current not in resolved:
+                if current in visited:
+                    raise InvariantViolationError(
+                        "workspace placement contains a cycle"
+                    )
+                visited.add(current)
+                value = graph.get(current)
+                if value is None:
+                    raise InvariantViolationError(
+                        "workspace placement parent is missing"
+                    )
+                chain.append((current, value))
+                current = value[2]
+            if current is None:
+                parent_path = ""
+                parent_active = True
+            else:
+                parent_path, parent_active, _parent_lifecycle = resolved[current]
+            for current_id, (name, lifecycle, _parent_id) in reversed(chain):
+                path = name if not parent_path else f"{parent_path}/{name}"
+                active = (
+                    parent_active
+                    and lifecycle == enums.WorkspaceItemLifecycleStatus.ACTIVE
+                )
+                resolved[current_id] = (path, active, lifecycle)
+                parent_path = path
+                parent_active = active
+        return resolved
+
+    @staticmethod
+    def _read_record(
+        row,
+        path_value: tuple[
+            str,
+            bool,
+            enums.WorkspaceItemLifecycleStatus,
+        ],
+    ) -> WorkspaceReadRecord:
+        (
+            item,
+            placement,
+            node,
+            source,
+            root_node_id,
+            working,
+            current_revision,
+            previous_revision,
+        ) = row
+        workspace_path, effectively_active, _lifecycle = path_value
+        return WorkspaceReadRecord(
+            item=_workspace_item_from_model(item),
+            placement=_placement_from_model(placement),
+            workspace_path=workspace_path,
+            effectively_active=bool(effectively_active),
+            source_node=None if node is None else _node_from_model(node),
+            source=(
+                None
+                if source is None
+                else _source_from_model(source, root_node_id)
+            ),
+            working_artifact=(
+                None
+                if working is None
+                else _working_artifact_from_model(working)
+            ),
+            current_revision=(
+                None
+                if current_revision is None
+                else _working_revision_from_model(current_revision)
+            ),
+            previous_revision=(
+                None
+                if previous_revision is None
+                else _working_revision_from_model(previous_revision)
+            ),
+        )
+
+    def read_records_for_project(
+        self, project_id: str
+    ) -> Sequence[WorkspaceReadRecord]:
+        path_index = self._path_index(project_id)
+        rows = self._session.execute(self._read_statement(project_id)).all()
+        records = [
+            self._read_record(row, path_index[row[0].id]) for row in rows
+        ]
+        records.sort(
+            key=lambda value: (value.workspace_path.casefold(), value.item.id)
+        )
+        return records
+
+    def read_record_for_item(
+        self, project_id: str, item_id: str
+    ) -> Optional[WorkspaceReadRecord]:
+        path_index = self._path_index(project_id)
+        statement = self._read_statement(project_id)
+        row = self._session.execute(
+            statement.where(models.WorkspaceItemModel.id == item_id)
+        ).one_or_none()
+        return (
+            None
+            if row is None or item_id not in path_index
+            else self._read_record(row, path_index[item_id])
+        )
+
+    def search_read_records(
+        self,
+        project_id: str,
+        *,
+        query: str,
+        formats: Sequence[enums.NodeFormat],
+        content_statuses: Sequence[enums.WorkingContentStatus],
+        lifecycle_statuses: Sequence[enums.WorkspaceItemLifecycleStatus],
+        limit: int,
+        offset: int,
+    ) -> tuple[Sequence[WorkspaceReadRecord], int]:
+        path_index = self._path_index(project_id)
+        eligible_ids = tuple(
+            item_id
+            for item_id, (_path, effectively_active, lifecycle) in path_index.items()
+            if lifecycle in lifecycle_statuses
+            and (
+                lifecycle != enums.WorkspaceItemLifecycleStatus.ACTIVE
+                or effectively_active
+            )
+        )
+        if not eligible_ids:
+            return (), 0
+        statement = self._read_statement(project_id)
+        conditions = [
+            models.WorkspaceItemModel.id.in_(eligible_ids),
+        ]
+        if formats:
+            conditions.append(models.NodeModel.format.in_(formats))
+        if content_statuses:
+            conditions.append(
+                models.WorkingArtifactModel.content_status.in_(content_statuses)
+            )
+        if query:
+            escaped = (
+                query.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            pattern = f"%{escaped}%"
+            matching_path_ids = tuple(
+                item_id
+                for item_id, (path, _active, _lifecycle) in path_index.items()
+                if query in path.casefold()
+            )
+            conditions.append(
+                or_(
+                    models.WorkspaceItemModel.id.in_(matching_path_ids),
+                    models.NodeModel.original_name.ilike(pattern, escape="\\"),
+                    models.NodeModel.logical_path.ilike(pattern, escape="\\"),
+                )
+            )
+        statement = statement.where(*conditions)
+        count_statement = select(func.count()).select_from(
+            statement.with_only_columns(models.WorkspaceItemModel.id)
+            .order_by(None)
+            .subquery()
+        )
+        total = int(self._session.scalar(count_statement) or 0)
+        rows = self._session.execute(
+            statement.order_by(
+                func.lower(models.WorkspaceItemModel.display_name),
+                models.WorkspaceItemModel.id,
+            ).limit(limit).offset(offset)
+        ).all()
+        return [
+            self._read_record(row, path_index[row[0].id]) for row in rows
+        ], total
 
     def _require_parent(
         self,

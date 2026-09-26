@@ -199,6 +199,7 @@ QTabBar::tab:selected {
     font-weight: 650;
 }
 
+QTreeView,
 QTreeWidget,
 QTableWidget,
 QTextBrowser {
@@ -210,6 +211,7 @@ QTextBrowser {
     outline: 0;
 }
 
+QTreeView::item,
 QTreeWidget::item,
 QTableWidget::item {
     min-height: 30px;
@@ -217,6 +219,7 @@ QTableWidget::item {
     border-bottom: 1px solid #edf0f3;
 }
 
+QTreeView::item:hover,
 QTreeWidget::item:hover,
 QTableWidget::item:hover {
     background: #edf3f7;

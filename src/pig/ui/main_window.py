@@ -7,7 +7,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, TypeVar
 
-from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
+from PySide6.QtCore import (
+    QAbstractItemModel,
+    QEvent,
+    QItemSelectionModel,
+    QModelIndex,
+    QSize,
+    QTimer,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -30,8 +39,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTextBrowser,
     QToolButton,
-    QTreeWidget,
-    QTreeWidgetItem,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
@@ -41,6 +49,7 @@ from pig.application import (
     CreateProjectRequest,
     CreateWorkspaceFolderRequest,
     ExportWorkspaceItemsRequest,
+    GetRecentProjectEventsRequest,
     GetWorkspaceTreeRequest,
     InspectProjectRecoveryRequest,
     LoadProjectRequest,
@@ -118,18 +127,281 @@ class FormatMultiSelect(EnumMultiSelect):
         super().__init__(NodeFormat, "全部格式", parent)
 
 
-class WorkspaceTree(QTreeWidget):
+class WorkspaceTreeModel(QAbstractItemModel):
+    """Virtual Qt projection over already-loaded typed Workspace views."""
+
+    HEADERS = ("名称", "类型", "格式", "工作状态")
+
+    def __init__(self, icon_provider=None, parent=None) -> None:
+        super().__init__(parent)
+        self._icon_provider = icon_provider
+        self._views: dict[str, WorkspaceItemView] = {}
+        self._children: dict[str | None, tuple[str, ...]] = {None: ()}
+        self._id_to_key: dict[str, int] = {}
+        self._key_to_id: dict[int, str] = {}
+
+    def set_views(self, views: Iterable[WorkspaceItemView]) -> None:
+        values = tuple(views)
+        children: dict[str | None, list[WorkspaceItemView]] = {}
+        for view in values:
+            children.setdefault(
+                view.placement.parent_workspace_item_id, []
+            ).append(view)
+        self.beginResetModel()
+        self._views = {view.item.id: view for view in values}
+        self._id_to_key = {
+            item_id: key for key, item_id in enumerate(self._views, start=1)
+        }
+        self._key_to_id = {
+            key: item_id for item_id, key in self._id_to_key.items()
+        }
+        self._children = {
+            parent_id: tuple(
+                view.item.id
+                for view in sorted(
+                    child_views,
+                    key=lambda value: (
+                        value.placement.ordinal,
+                        value.item.id,
+                    ),
+                )
+            )
+            for parent_id, child_views in children.items()
+        }
+        self._children.setdefault(None, ())
+        self.endResetModel()
+
+    @property
+    def views(self) -> dict[str, WorkspaceItemView]:
+        return self._views
+
+    def index_for_id(self, item_id: str, column: int = 0) -> QModelIndex:
+        view = self._views.get(item_id)
+        if view is None:
+            return QModelIndex()
+        siblings = self._children.get(
+            view.placement.parent_workspace_item_id, ()
+        )
+        try:
+            row = siblings.index(item_id)
+        except ValueError:
+            return QModelIndex()
+        return self.createIndex(row, column, self._id_to_key[item_id])
+
+    def item_id(self, index: QModelIndex) -> str | None:
+        if not index.isValid():
+            return None
+        return self._key_to_id.get(index.internalId())
+
+    def index(
+        self,
+        row: int,
+        column: int,
+        parent: QModelIndex = QModelIndex(),
+    ) -> QModelIndex:
+        if row < 0 or column < 0 or column >= len(self.HEADERS):
+            return QModelIndex()
+        parent_id = self.item_id(parent)
+        children = self._children.get(parent_id, ())
+        if row >= len(children):
+            return QModelIndex()
+        item_id = children[row]
+        return self.createIndex(row, column, self._id_to_key[item_id])
+
+    def parent(self, child: QModelIndex) -> QModelIndex:
+        if not child.isValid():
+            return QModelIndex()
+        view = self._views.get(self.item_id(child))
+        if view is None:
+            return QModelIndex()
+        parent_id = view.placement.parent_workspace_item_id
+        if parent_id is None:
+            return QModelIndex()
+        parent_view = self._views.get(parent_id)
+        if parent_view is None:
+            return QModelIndex()
+        siblings = self._children.get(
+            parent_view.placement.parent_workspace_item_id, ()
+        )
+        try:
+            row = siblings.index(parent_id)
+        except ValueError:
+            return QModelIndex()
+        return self.createIndex(row, 0, self._id_to_key[parent_id])
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid() and parent.column() != 0:
+            return 0
+        parent_id = self.item_id(parent)
+        return len(self._children.get(parent_id, ()))
+
+    def columnCount(self, _parent: QModelIndex = QModelIndex()) -> int:
+        return len(self.HEADERS)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        view = self._views.get(self.item_id(index))
+        if view is None:
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
+            values = (
+                view.item.display_name,
+                view.item.item_kind.value,
+                "" if view.source_node is None else view.source_node.format.value,
+                (
+                    view.working_artifact.content_status.value
+                    if view.working_artifact is not None
+                    else view.item.materialization_status.value
+                ),
+            )
+            return values[index.column()]
+        if role == Qt.ItemDataRole.DecorationRole and index.column() == 0:
+            return None if self._icon_provider is None else self._icon_provider(view)
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if index.column() == 0:
+                return view.workspace_path
+            if index.column() == 3:
+                return self.data(index, Qt.ItemDataRole.DisplayRole)
+        if role == ITEM_ID_ROLE:
+            return view.item.id
+        if role == ITEM_KIND_ROLE:
+            return view.item.item_kind.value
+        return None
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if (
+            orientation == Qt.Orientation.Horizontal
+            and role == Qt.ItemDataRole.DisplayRole
+            and 0 <= section < len(self.HEADERS)
+        ):
+            return self.HEADERS[section]
+        return None
+
+    def flags(self, index: QModelIndex):
+        if not index.isValid():
+            return Qt.ItemFlag.ItemIsDropEnabled
+        flags = (
+            Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsDragEnabled
+        )
+        view = self._views.get(self.item_id(index))
+        if view is not None and view.item.item_kind in {
+            WorkspaceItemKind.FOLDER,
+            WorkspaceItemKind.CONTAINER_VIEW,
+        }:
+            flags |= Qt.ItemFlag.ItemIsDropEnabled
+        return flags
+
+    def supportedDropActions(self):
+        return Qt.DropAction.MoveAction | Qt.DropAction.CopyAction
+
+
+class _TreeIndexItem:
+    """Small compatibility wrapper; created only for requested QModelIndexes."""
+
+    def __init__(self, tree: "WorkspaceTree", index: QModelIndex) -> None:
+        self._tree = tree
+        self._index = index.siblingAtColumn(0)
+
+    def data(self, column: int, role: int):
+        return self._index.siblingAtColumn(column).data(role)
+
+    def text(self, column: int) -> str:
+        value = self._index.siblingAtColumn(column).data(
+            Qt.ItemDataRole.DisplayRole
+        )
+        return "" if value is None else str(value)
+
+    def parent(self):
+        parent = self._index.parent()
+        return None if not parent.isValid() else _TreeIndexItem(self._tree, parent)
+
+    def child(self, row: int):
+        index = self._tree.model().index(row, 0, self._index)
+        return None if not index.isValid() else _TreeIndexItem(self._tree, index)
+
+    def childCount(self) -> int:
+        return self._tree.model().rowCount(self._index)
+
+    def indexOfChild(self, child: "_TreeIndexItem") -> int:
+        return child._index.row()
+
+    def setSelected(self, selected: bool) -> None:
+        command = (
+            QItemSelectionModel.SelectionFlag.Select
+            if selected
+            else QItemSelectionModel.SelectionFlag.Deselect
+        ) | QItemSelectionModel.SelectionFlag.Rows
+        self._tree.selectionModel().select(self._index, command)
+
+    def isSelected(self) -> bool:
+        return self._tree.selectionModel().isSelected(self._index)
+
+    def setExpanded(self, expanded: bool) -> None:
+        self._tree.setExpanded(self._index, expanded)
+
+    def isExpanded(self) -> bool:
+        return self._tree.isExpanded(self._index)
+
+
+class WorkspaceTree(QTreeView):
     external_paths_dropped = Signal(object, object)
     move_requested = Signal(str, object, int)
+    itemSelectionChanged = Signal()
+    itemDoubleClicked = Signal(object, int)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, icon_provider=None) -> None:
         super().__init__(parent)
-        self.setHeaderLabels(["名称", "类型", "格式", "工作状态"])
+        self.setModel(WorkspaceTreeModel(icon_provider, self))
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.selectionModel().selectionChanged.connect(
+            lambda *_args: self.itemSelectionChanged.emit()
+        )
+        self.doubleClicked.connect(
+            lambda index: self.itemDoubleClicked.emit(
+                _TreeIndexItem(self, index), index.column()
+            )
+        )
+
+    def set_views(self, views: Iterable[WorkspaceItemView]) -> None:
+        self.model().set_views(views)
+
+    def clear(self) -> None:
+        self.set_views(())
+
+    def topLevelItemCount(self) -> int:
+        return self.model().rowCount()
+
+    def topLevelItem(self, row: int):
+        index = self.model().index(row, 0)
+        return None if not index.isValid() else _TreeIndexItem(self, index)
+
+    def indexOfTopLevelItem(self, item: _TreeIndexItem) -> int:
+        return item._index.row()
+
+    def selectedItems(self) -> list[_TreeIndexItem]:
+        return [
+            _TreeIndexItem(self, index)
+            for index in self.selectionModel().selectedRows(0)
+        ]
+
+    def currentItem(self):
+        index = self.currentIndex()
+        return None if not index.isValid() else _TreeIndexItem(self, index)
+
+    def setCurrentItem(self, item: _TreeIndexItem) -> None:
+        self.setCurrentIndex(item._index)
+
+    def itemAt(self, position):
+        index = self.indexAt(position)
+        return None if not index.isValid() else _TreeIndexItem(self, index)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls() or event.source() is self:
@@ -431,7 +703,7 @@ class MainWindow(QMainWindow):
         splitter.setHandleWidth(8)
         self.left_tabs = QTabWidget()
         self.left_tabs.setMinimumWidth(620)
-        self.tree = WorkspaceTree()
+        self.tree = WorkspaceTree(icon_provider=self._workspace_item_icon)
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
         self.tree.setIndentation(20)
@@ -1228,8 +1500,11 @@ class MainWindow(QMainWindow):
                         database_path=self._database_path,
                     )
                 ),
-                self._application.load_project(
-                    LoadProjectRequest(database_path=self._database_path)
+                self._application.get_recent_project_events(
+                    GetRecentProjectEventsRequest(
+                        project_id=self._project_id,
+                        database_path=self._database_path,
+                    )
                 ),
             ),
             lambda result: self._apply_workspace(result[0], result[1].events),
@@ -1250,38 +1525,7 @@ class MainWindow(QMainWindow):
         self.project_location.setToolTip(str(self._database_path))
         self.project_meta.setToolTip(str(self._database_path))
         self._set_project_state("工作区就绪", "ready")
-        self.tree.clear()
-        widgets = {}
-        pending = list(result.items)
-        while pending:
-            progressed = False
-            for view in tuple(pending):
-                parent_id = view.placement.parent_workspace_item_id
-                if parent_id is not None and parent_id not in widgets:
-                    continue
-                widget = QTreeWidgetItem(
-                    [
-                        view.item.display_name,
-                        view.item.item_kind.value,
-                        "" if view.source_node is None else view.source_node.format.value,
-                        self._working_status(view),
-                    ]
-                )
-                widget.setData(0, ITEM_ID_ROLE, view.item.id)
-                widget.setData(0, ITEM_KIND_ROLE, view.item.item_kind.value)
-                widget.setIcon(0, self._workspace_item_icon(view))
-                widget.setToolTip(0, view.workspace_path)
-                widget.setToolTip(3, self._working_status(view))
-                parent = widgets.get(parent_id)
-                if parent is None:
-                    self.tree.addTopLevelItem(widget)
-                else:
-                    parent.addChild(widget)
-                widgets[view.item.id] = widget
-                pending.remove(view)
-                progressed = True
-            if not progressed:
-                raise RuntimeError("Workspace projection contains an unresolved parent")
+        self.tree.set_views(result.items)
         self.tree.expandToDepth(1)
         self.deleted_items.setRowCount(0)
         for view in result.deleted_items:
@@ -1300,9 +1544,9 @@ class MainWindow(QMainWindow):
                     cell.setIcon(self._workspace_item_icon(view))
                 self.deleted_items.setItem(row, column, cell)
         self._populate_events(events)
-        selected_widget = widgets.get(selected_id)
-        if selected_widget is not None:
-            self.tree.setCurrentItem(selected_widget)
+        selected_index = self.tree.model().index_for_id(selected_id)
+        if selected_index.isValid():
+            self.tree.setCurrentIndex(selected_index)
             self._show_view(selected_id)
         else:
             self._show_view(None)

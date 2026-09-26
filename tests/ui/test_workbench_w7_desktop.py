@@ -4,6 +4,7 @@ import os
 import time
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -14,12 +15,16 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QInputDialog,
     QMessageBox,
-    QTreeWidgetItem,
 )
 
 from pig.application import CreateProjectRequest
 from pig.bootstrap import create_local_application
-from pig.domain.enums import NodeFormat, WorkingContentStatus
+from pig.domain.enums import (
+    NodeFormat,
+    WorkingContentStatus,
+    WorkspaceItemKind,
+    WorkspaceMaterializationStatus,
+)
 from pig.ui.main_window import ITEM_ID_ROLE, ITEM_KIND_ROLE, MainWindow, WorkspaceTree
 
 
@@ -256,10 +261,26 @@ def test_workspace_tree_drop_translates_external_paths_and_internal_move(
     qt_app, tmp_path: Path
 ) -> None:
     tree = WorkspaceTree()
-    source = QTreeWidgetItem(["source"])
-    source.setData(0, ITEM_ID_ROLE, "source-id")
-    source.setData(0, ITEM_KIND_ROLE, "FILE")
-    tree.addTopLevelItem(source)
+    tree.set_views(
+        (
+            SimpleNamespace(
+                item=SimpleNamespace(
+                    id="source-id",
+                    display_name="source",
+                    item_kind=WorkspaceItemKind.FILE,
+                    materialization_status=WorkspaceMaterializationStatus.VIRTUAL,
+                ),
+                placement=SimpleNamespace(
+                    parent_workspace_item_id=None,
+                    ordinal=0,
+                ),
+                source_node=None,
+                working_artifact=None,
+                workspace_path="source",
+            ),
+        )
+    )
+    source = tree.topLevelItem(0)
     tree.setCurrentItem(source)
     external = []
     moves = []

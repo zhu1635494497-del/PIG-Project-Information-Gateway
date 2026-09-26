@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Protocol, Sequence
 
@@ -72,6 +73,21 @@ class ProjectRepository(Protocol):
         *,
         updated_at: datetime,
     ) -> Project: ...
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceReadRecord:
+    """Set-based read projection assembled from persisted Workspace facts."""
+
+    item: WorkspaceItem
+    placement: WorkspacePlacement
+    workspace_path: str
+    effectively_active: bool
+    source_node: Optional[Node] = None
+    source: Optional[Source] = None
+    working_artifact: Optional[WorkingArtifact] = None
+    current_revision: Optional[WorkingRevision] = None
+    previous_revision: Optional[WorkingRevision] = None
 
 
 class ImportRepository(Protocol):
@@ -169,6 +185,26 @@ class ImportRepository(Protocol):
 
 
 class WorkspaceRepository(Protocol):
+    def read_records_for_project(
+        self, project_id: str
+    ) -> Sequence[WorkspaceReadRecord]: ...
+
+    def read_record_for_item(
+        self, project_id: str, item_id: str
+    ) -> Optional[WorkspaceReadRecord]: ...
+
+    def search_read_records(
+        self,
+        project_id: str,
+        *,
+        query: str,
+        formats: Sequence[NodeFormat],
+        content_statuses: Sequence[WorkingContentStatus],
+        lifecycle_statuses: Sequence[WorkspaceItemLifecycleStatus],
+        limit: int,
+        offset: int,
+    ) -> tuple[Sequence[WorkspaceReadRecord], int]: ...
+
     def add_item(
         self,
         item: WorkspaceItem,
@@ -459,6 +495,10 @@ class ProcessingRepository(Protocol):
     def append_event(self, event: ProcessingEvent) -> None: ...
 
     def events_for_project(self, project_id: str) -> Sequence[ProcessingEvent]: ...
+
+    def recent_events_for_project(
+        self, project_id: str, *, limit: int
+    ) -> Sequence[ProcessingEvent]: ...
 
 
 class RecoveryRepository(Protocol):

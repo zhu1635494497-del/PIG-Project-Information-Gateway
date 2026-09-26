@@ -1,6 +1,6 @@
 # PIG V1 Workbench W10 性能与响应性稳定 / Performance and Responsiveness Stabilization
 
-- 状态：已批准，实施中 / Status: Approved; implementation in progress
+- 状态：已批准；W10.1 已完成，W10.2 待进入 / Status: Approved; W10.1 complete, W10.2 pending entry
 - 日期：2026-09-25 / Date: 2026-09-25
 - 决策：`ADR-022`，D92-A 至 D99-A / Decisions: `ADR-022`, D92-A through D99-A
 - 分支：`v1优化` / Branch: `v1优化`
@@ -60,6 +60,42 @@ not stop responding because it constructs every widget eagerly.
   100 ms。 / On the reference host, median 10k Tree query is at most 1.5
   seconds and first Search page at most 0.75 seconds; the Tree does not create
   every Qt item eagerly; no synchronous GUI batch exceeds 100 ms.
+
+### W10.1 实施证据 / W10.1 Implementation Evidence
+
+- 完成日期：2026-09-26。 / Completed: 2026-09-26.
+- Workspace Tree 从每个 Item 多次 Repository 查询改为固定三条 SQL：Project、轻量
+  Placement Graph、Set-based Joined Projection；路径和有效状态在线性时间内计算。 /
+  Workspace Tree changed from repeated per-item repository calls to three fixed
+  SQL statements: Project, a lightweight placement graph, and a set-based joined
+  projection. Paths and effective state are resolved in linear time.
+- Search 使用固定四条 SQL：Project、Placement Graph、数据库 Count 和数据库 Page；
+  Format、Content Status、Lifecycle 和 Query Candidate 在数据库边界过滤。 / Search
+  uses four fixed SQL statements: Project, placement graph, database count, and
+  database page. Format, content status, lifecycle, and query candidates are
+  filtered at the database boundary.
+- UI 已迁移到 `QTreeView + QAbstractItemModel`；Qt 只为请求的行创建 `QModelIndex`，
+  不再全量构造 `QTreeWidgetItem`。 / The UI now uses
+  `QTreeView + QAbstractItemModel`; Qt creates `QModelIndex` values only for
+  requested rows and no longer builds every `QTreeWidgetItem`.
+- Activity Record 改为 typed Recent Events Query，默认只读取最近 300 条，不再通过
+  完整 Project Overview 加载全部 Event。 / Activity Record now uses a typed
+  recent-events query, reading only the latest 300 by default instead of loading
+  all Events through the complete Project Overview.
+- 同参考主机三轮中位数：10,000 Item Tree `1.121s`，Search `0.290s`；旧基线分别为
+  `5.734s` 与 `5.775s`。 / Three-run medians on the reference host are `1.121s`
+  for a 10,000-item Tree and `0.290s` for Search, versus the old `5.734s` and
+  `5.775s` baselines.
+- 10,000 Item Qt Model Reset 为 `0.010s`，Reset 后未预建任何 Item Index，单个请求
+  Index 约 `0.00002s`。 / Resetting the 10,000-item Qt model takes `0.010s`;
+  no item indexes are prebuilt after reset, and one requested index takes about
+  `0.00002s`.
+- 全量回归：`149 passed, 95 skipped`；Skip 属于 ADR-010 后的历史 Contract 或主机
+  Symlink 限制。 / Full regression: `149 passed, 95 skipped`; skips are historical
+  contracts superseded by ADR-010 or host symlink restrictions.
+- 本阶段不创建 `0009`：现有索引已达到目标，缺少新增索引的 Query Plan 证据。 /
+  W10.1 does not create `0009`: current indexes meet the targets and no query-plan
+  evidence justifies another index.
 
 ## W10.2：Import 与 Processing Persistence / Import and Processing Persistence
 

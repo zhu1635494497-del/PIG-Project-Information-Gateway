@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import text
@@ -172,6 +172,31 @@ def test_workbench_repository_round_trip_preserves_core_objects(uow_factory) -> 
         assert uow.workspace.get_placement(file_item.id).parent_workspace_item_id == root.id
         assert uow.workspace.working_artifact_for_item(file_item.id) == working
         assert uow.processing.events_for_project("project-1") == [event]
+
+
+def test_recent_project_events_are_bounded_and_chronological(uow_factory) -> None:
+    events = [
+        ProcessingEvent(
+            id=f"event-{index}",
+            event_type=EventType.WORKSPACE_ITEM_ADDED,
+            project_id="project-1",
+            actor="tester",
+            occurred_at=NOW + timedelta(seconds=index),
+            severity=EventSeverity.INFO,
+            correlation_id=f"correlation-{index}",
+        )
+        for index in range(4)
+    ]
+    with uow_factory() as uow:
+        uow.projects.add(_project())
+        for value in events:
+            uow.processing.append_event(value)
+        uow.commit()
+
+    with uow_factory() as uow:
+        assert uow.processing.recent_events_for_project(
+            "project-1", limit=2
+        ) == events[-2:]
 
 
 def test_workspace_move_rejects_cycle_and_preserves_old_placement(uow_factory) -> None:

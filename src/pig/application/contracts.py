@@ -467,6 +467,19 @@ class ProjectOverview:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class GetRecentProjectEventsRequest:
+    project_id: str
+    database_path: Path
+    limit: int = 300
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GetRecentProjectEventsResult:
+    project_id: str
+    events: Sequence[ProcessingEvent]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class LoadProjectRequest:
     database_path: Path
 

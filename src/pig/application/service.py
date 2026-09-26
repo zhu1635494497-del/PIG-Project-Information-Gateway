@@ -17,6 +17,8 @@ from pig.application.contracts import (
     ExportWorkspaceItemsRequest,
     ExportWorkspaceItemsResult,
     GetNodeRequest,
+    GetRecentProjectEventsRequest,
+    GetRecentProjectEventsResult,
     GetWorkspaceItemRequest,
     GetWorkspaceItemResult,
     GetWorkspaceTreeRequest,
@@ -506,6 +508,36 @@ class PigApplication:
         return ProjectOverview(
             project=project,
             sources=tuple(source_views),
+            events=events,
+        )
+
+    def get_recent_project_events(
+        self, request: GetRecentProjectEventsRequest
+    ) -> GetRecentProjectEventsResult:
+        database_path = self._absolute_path(request.database_path, "database_path")
+        if (
+            not isinstance(request.limit, int)
+            or isinstance(request.limit, bool)
+            or not 1 <= request.limit <= 1_000
+        ):
+            raise ApplicationError(
+                "INVALID_REQUEST", "limit must be between 1 and 1000"
+            )
+        with self._database.unit_of_work(database_path) as uow:
+            project = uow.projects.get(request.project_id)
+            if project is None:
+                raise EntityNotFoundError(
+                    f"project not found: {request.project_id}"
+                )
+            self._require_supported_model(project)
+            self._require_matching_workspace(project, database_path)
+            events = tuple(
+                uow.processing.recent_events_for_project(
+                    project.id, limit=request.limit
+                )
+            )
+        return GetRecentProjectEventsResult(
+            project_id=project.id,
             events=events,
         )
 

@@ -1195,3 +1195,17 @@ class SqlAlchemyProcessingRepository:
             )
         ).all()
         return [_event_from_model(row) for row in rows]
+
+    def recent_events_for_project(
+        self, project_id: str, *, limit: int
+    ) -> Sequence[entities.ProcessingEvent]:
+        rows = self._session.scalars(
+            select(models.ProcessingEventModel)
+            .where(models.ProcessingEventModel.project_id == project_id)
+            .order_by(
+                models.ProcessingEventModel.occurred_at.desc(),
+                models.ProcessingEventModel.id.desc(),
+            )
+            .limit(limit)
+        ).all()
+        return [_event_from_model(row) for row in reversed(rows)]

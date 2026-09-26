@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from pig.application.contracts import (
     GetWorkspaceItemRequest,
@@ -16,10 +16,9 @@ from pig.application.ports import ProjectDatabaseProvider
 from pig.domain.enums import (
     NodeFormat,
     WorkingContentStatus,
-    WorkingRevisionRole,
     WorkspaceItemLifecycleStatus,
 )
-from pig.domain.exceptions import EntityNotFoundError, InvariantViolationError
+from pig.domain.exceptions import EntityNotFoundError
 from pig.domain.model_version import WORKBENCH_MODEL_VERSION
 
 
@@ -56,15 +55,19 @@ class WorkspaceQueryService:
         project_id, database_path = self._identity(
             request.project_id, request.database_path
         )
-        project, views = self._project_views(project_id, database_path)
-        view = next(
-            (value for value in views if value.item.id == request.workspace_item_id),
-            None,
-        )
-        if view is None:
-            raise EntityNotFoundError(
-                f"workspace item not found: {request.workspace_item_id}"
+        with self._database.unit_of_work(database_path) as uow:
+            project = uow.projects.get(project_id)
+            if project is None:
+                raise EntityNotFoundError(f"project not found: {project_id}")
+            self._project(project, database_path)
+            record = uow.workspace.read_record_for_item(
+                project_id, request.workspace_item_id
             )
+            if record is None:
+                raise EntityNotFoundError(
+                    f"workspace item not found: {request.workspace_item_id}"
+                )
+            view = self._view(record)
         return GetWorkspaceItemResult(project=project, view=view)
 
     def search(
@@ -87,41 +90,21 @@ class WorkspaceQueryService:
             "lifecycle_statuses",
         )
         query = "" if request.query is None else request.query.strip().casefold()
-        _project, views = self._project_views(project_id, database_path)
-        matched = []
-        for view in views:
-            if view.item.lifecycle_status not in lifecycle:
-                continue
-            if (
-                view.item.lifecycle_status == WorkspaceItemLifecycleStatus.ACTIVE
-                and not view.effectively_active
-            ):
-                continue
-            if formats and (
-                view.source_node is None or view.source_node.format not in formats
-            ):
-                continue
-            status = (
-                None
-                if view.working_artifact is None
-                else view.working_artifact.content_status
+        with self._database.unit_of_work(database_path) as uow:
+            project = uow.projects.get(project_id)
+            if project is None:
+                raise EntityNotFoundError(f"project not found: {project_id}")
+            self._project(project, database_path)
+            records, total = uow.workspace.search_read_records(
+                project_id,
+                query=query,
+                formats=formats,
+                content_statuses=content,
+                lifecycle_statuses=lifecycle,
+                limit=request.limit,
+                offset=request.offset,
             )
-            if content and status not in content:
-                continue
-            searchable = "\n".join(
-                (
-                    view.item.display_name,
-                    view.workspace_path,
-                    "" if view.source_node is None else view.source_node.original_name,
-                    "" if view.source_node is None else view.source_node.logical_path,
-                )
-            ).casefold()
-            if query and query not in searchable:
-                continue
-            matched.append(view)
-        matched.sort(key=lambda value: (value.workspace_path.casefold(), value.item.id))
-        total = len(matched)
-        page = tuple(matched[request.offset : request.offset + request.limit])
+            page = tuple(self._view(record) for record in records)
         return SearchWorkspaceItemsResult(
             project_id=project_id,
             items=page,
@@ -137,95 +120,23 @@ class WorkspaceQueryService:
             if project is None:
                 raise EntityNotFoundError(f"project not found: {project_id}")
             self._project(project, database_path)
-            items = tuple(
-                uow.workspace.items_for_project(project_id, include_deleted=True)
-            )
-            placements = {
-                item.id: uow.workspace.get_placement(item.id) for item in items
-            }
-            by_id = {item.id: item for item in items}
-            views = []
-            for item in items:
-                placement = placements[item.id]
-                if placement is None:
-                    raise InvariantViolationError("workspace item placement is missing")
-                source_node = (
-                    None
-                    if item.origin_source_node_id is None
-                    else uow.catalog.get_node(item.origin_source_node_id)
-                )
-                source = (
-                    None
-                    if source_node is None
-                    else uow.catalog.get_source(source_node.source_id)
-                )
-                working = uow.workspace.working_artifact_for_item(item.id)
-                current_revision = (
-                    None
-                    if working is None
-                    else uow.workspace.working_revision_for_artifact(
-                        working.id, WorkingRevisionRole.CURRENT_CHECKPOINT
-                    )
-                )
-                previous_revision = (
-                    None
-                    if working is None
-                    else uow.workspace.working_revision_for_artifact(
-                        working.id, WorkingRevisionRole.PREVIOUS
-                    )
-                )
-                views.append(
-                    WorkspaceItemView(
-                        item=item,
-                        placement=placement,
-                        workspace_path=self._workspace_path(
-                            item.id, by_id, placements
-                        ),
-                        effectively_active=self._effectively_active(
-                            item.id, by_id, placements
-                        ),
-                        source_node=source_node,
-                        source=source,
-                        working_artifact=working,
-                        current_revision=current_revision,
-                        previous_revision=previous_revision,
-                    )
-                )
+            records = uow.workspace.read_records_for_project(project_id)
+            views = tuple(self._view(record) for record in records)
         return project, tuple(views)
 
     @staticmethod
-    def _workspace_path(item_id, by_id, placements) -> str:
-        segments: list[str] = []
-        current = item_id
-        visited: set[str] = set()
-        while current is not None:
-            if current in visited:
-                raise InvariantViolationError("workspace placement contains a cycle")
-            visited.add(current)
-            item = by_id.get(current)
-            placement = placements.get(current)
-            if item is None or placement is None:
-                raise InvariantViolationError("workspace placement parent is missing")
-            segments.append(item.display_name)
-            current = placement.parent_workspace_item_id
-        return str(PurePosixPath(*reversed(segments)))
-
-    @staticmethod
-    def _effectively_active(item_id, by_id, placements) -> bool:
-        current = item_id
-        visited: set[str] = set()
-        while current is not None:
-            if current in visited:
-                raise InvariantViolationError("workspace placement contains a cycle")
-            visited.add(current)
-            item = by_id.get(current)
-            placement = placements.get(current)
-            if item is None or placement is None:
-                raise InvariantViolationError("workspace placement parent is missing")
-            if item.lifecycle_status != WorkspaceItemLifecycleStatus.ACTIVE:
-                return False
-            current = placement.parent_workspace_item_id
-        return True
+    def _view(record) -> WorkspaceItemView:
+        return WorkspaceItemView(
+            item=record.item,
+            placement=record.placement,
+            workspace_path=record.workspace_path,
+            effectively_active=record.effectively_active,
+            source_node=record.source_node,
+            source=record.source,
+            working_artifact=record.working_artifact,
+            current_revision=record.current_revision,
+            previous_revision=record.previous_revision,
+        )
 
     @staticmethod
     def _enum_values(values, enum_type, field):
