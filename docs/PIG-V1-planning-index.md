@@ -2,7 +2,7 @@
 
 - 当前日期：2026-09-27 / Date: 2026-09-27
 - 当前阶段：Workbench W10.5 自动资格 Gate 与源码桌面复验已通过；RC.2 等待最终打包桌面人工验收 / Current phase: Workbench W10.5 automated qualification gates and source-desktop re-acceptance pass; RC.2 is pending final-package manual desktop acceptance
-- 代码授权：W1–W10；D92–D99 已批准，正式外发仍受人工 Gate 约束 / Code authorization: W1-W10; D92-D99 approved, with official distribution still gated by human review
+- 代码授权：W1–W10；D92–D100 已批准，正式外发仍受人工 Gate 约束 / Code authorization: W1-W10; D92-D100 approved, with official distribution still gated by human review
 
 ## 当前规范优先级 / Active authority order
 
@@ -38,6 +38,18 @@
 30. `docs/application/PIG-V1-workbench-W9.md`
 31. `docs/decisions/ADR-022-v1-performance-responsiveness-stabilization.md`
 32. `docs/application/PIG-V1-workbench-W10.md`
+33. `docs/decisions/ADR-023-project-information-gateway-identity.md`
+
+`ADR-023` 已接受，D100-B 已批准。正式产品身份改为
+**PIG — Project Information Gateway**；Python import `pig`、`pig-desktop`、
+`PIG.exe`、数据库 Schema 和已发布的 `v1.0.0-rc.1` 历史身份保持不变。长期概念
+**PIG — Project Information Graph** 继续保留。
+
+`ADR-023` is accepted and D100-B is approved. The official product identity is
+now **PIG — Project Information Gateway**. Python import `pig`, `pig-desktop`,
+`PIG.exe`, the database schema, and the published historical identity of
+`v1.0.0-rc.1` remain unchanged. The long-term concept
+**PIG — Project Information Graph** also remains.
 
 `docs/decisions/ADR-022-v1-performance-responsiveness-stabilization.md` 已接受，
 D92–D99 已批准。W10 在 `v1优化` 分支、基线 Commit
@@ -205,6 +217,10 @@ they do not define the target V1 Workbench product.
   allow only query-plan- and benchmark-proven indexes in migration `0009`.
 - D99-A：使用固定 Fixture、三轮中位数、Peak RSS、SQLite 大小和 UI 心跳验收；
   qualify with fixed fixtures, three-run medians, peak RSS, SQLite size, and UI heartbeat.
+- D100-B：完整改名为 `PIG — Project Information Gateway`，保留内部稳定技术标识和
+  已发布 RC.1 历史；fully rename the product to
+  `PIG — Project Information Gateway` while retaining stable internal technical
+  identifiers and published RC.1 history.
 
 旧 Project 兼容性明确不在范围内。由于产品负责人指示无需考虑 D24，因此这里不
 记录任何 D24 选项。

@@ -4,7 +4,7 @@
 
 你正在开发的是：
 
-**PIG — Project Ingestion Gateway**
+**PIG — Project Information Gateway**
 
 PIG 不是普通文件管理器、普通解压软件，也不是一个为了展示 AI 而堆页面的后台系统。
 
@@ -1177,7 +1177,7 @@ Workflow
 
 ## 0. Project identity
 
-PIG — Project Ingestion Gateway is not a general file manager, a simple archive
+PIG — Project Information Gateway is not a general file manager, a simple archive
 utility, or an AI-themed shell. Its immediate mission is to turn fragmented and
 nested audit, finance, procurement, legal, and due-diligence inputs into a
 project workspace that is quick to inspect, open, organize, and edit. It then

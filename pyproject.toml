@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pig-project-ingestion-gateway"
+name = "pig-project-information-gateway"
 version = "1.0.0rc1"
 description = "A project workbench for complex nested business files"
 readme = "README.md"
@@ -21,10 +21,10 @@ dependencies = [
 pig-desktop = "pig.ui.app:main"
 
 [project.urls]
-Homepage = "https://github.com/zhu1635494497-del/PIG-Project-Ingestion-Gateway"
-Repository = "https://github.com/zhu1635494497-del/PIG-Project-Ingestion-Gateway.git"
-Issues = "https://github.com/zhu1635494497-del/PIG-Project-Ingestion-Gateway/issues"
-Releases = "https://github.com/zhu1635494497-del/PIG-Project-Ingestion-Gateway/releases"
+Homepage = "https://github.com/zhu1635494497-del/PIG-Project-Information-Gateway"
+Repository = "https://github.com/zhu1635494497-del/PIG-Project-Information-Gateway.git"
+Issues = "https://github.com/zhu1635494497-del/PIG-Project-Information-Gateway/issues"
+Releases = "https://github.com/zhu1635494497-del/PIG-Project-Information-Gateway/releases"
 
 [project.optional-dependencies]
 test = [

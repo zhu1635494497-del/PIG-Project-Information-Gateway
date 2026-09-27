@@ -15,7 +15,7 @@ from pig.domain.processing_policy import ProcessingPolicy
 from pig.infrastructure.archives import SevenZipRarBackend
 
 
-PROJECT_NAME = "pig-project-ingestion-gateway"
+PROJECT_NAME = "pig-project-information-gateway"
 
 
 def runtime_distributions() -> list[metadata.Distribution]:

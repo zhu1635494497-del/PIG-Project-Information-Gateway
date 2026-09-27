@@ -1,3 +1,3 @@
-"""PIG — Project Ingestion Gateway."""
+"""PIG — Project Information Gateway."""
 
 __version__ = "1.0.0rc1"

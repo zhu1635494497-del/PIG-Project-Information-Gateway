@@ -567,7 +567,7 @@ class MainWindow(QMainWindow):
         self._recovery_inspection_token: str | None = None
         self._logger = logging.getLogger(__name__)
 
-        self.setWindowTitle("PIG — Project Ingestion Gateway")
+        self.setWindowTitle("PIG — Project Information Gateway")
         self.resize(1380, 860)
         self.setMinimumSize(1080, 680)
         self.setAcceptDrops(True)
