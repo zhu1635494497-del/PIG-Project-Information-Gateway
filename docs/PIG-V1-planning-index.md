@@ -1,7 +1,7 @@
 # PIG V1 当前规划索引 / PIG V1 Active Planning Index
 
 - 当前日期：2026-09-27 / Date: 2026-09-27
-- 当前阶段：Workbench W10.5 自动资格 Gate 已通过；RC.2 等待人工桌面验收 / Current phase: Workbench W10.5 automated qualification gates pass; RC.2 is pending manual desktop acceptance
+- 当前阶段：Workbench W10.5 自动资格 Gate 与源码桌面复验已通过；RC.2 等待最终打包桌面人工验收 / Current phase: Workbench W10.5 automated qualification gates and source-desktop re-acceptance pass; RC.2 is pending final-package manual desktop acceptance
 - 代码授权：W1–W10；D92–D99 已批准，正式外发仍受人工 Gate 约束 / Code authorization: W1-W10; D92-D99 approved, with official distribution still gated by human review
 
 ## 当前规范优先级 / Active authority order

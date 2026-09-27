@@ -1,6 +1,6 @@
 # PIG V1 Workbench W10 性能与响应性稳定 / Performance and Responsiveness Stabilization
 
-- 状态：W10.1–W10.4 已完成；W10.5 自动资格 Gate 已通过，源码桌面首次人工验收发现滚动卡顿并已修复，等待复验 / Status: W10.1-W10.4 complete; W10.5 automated qualification gates pass; the first source-desktop acceptance found a scrolling stall that is now fixed and pending re-acceptance
+- 状态：W10.1–W10.4 已完成；W10.5 自动资格 Gate 与源码桌面滚动修复复验已通过，等待最终打包桌面人工验收 / Status: W10.1-W10.4 complete; W10.5 automated qualification gates and source-desktop re-acceptance of the scrolling fix pass; final-package manual desktop acceptance remains pending
 - 日期：2026-09-25 / Date: 2026-09-25
 - 决策：`ADR-022`，D92-A 至 D99-A / Decisions: `ADR-022`, D92-A through D99-A
 - 分支：`v1优化` / Branch: `v1优化`
@@ -406,14 +406,16 @@ not stop responding because it constructs every widget eagerly.
   Final full regression after the scrolling-responsiveness fix is `176 passed,
   95 skipped`, with one expected duplicate-ZIP warning. Migration head is
   `0008_workbench_recovery`, and the focused migration suite reports `4 passed`.
-- W10.5 自动性能、Migration、测试与 Package Gate 已通过；源码与最终打包桌面人工验收
-  仍需对滚动修复重新执行。重新构建包的 ICU 冲突检查、Runtime Smoke 与 Packaged Flow
-  已通过。版本保持 `1.0.0rc1`，人工验收前不得创建 `v1.0.0-rc.2` Tag 或 Release。 /
-  W10.5 automated performance, migration, test, and package gates pass; source
-  and final-package manual desktop acceptance must be rerun for the scrolling
-  fix. The rebuilt package passes the ICU collision check, runtime smoke, and
-  packaged flow. Version remains `1.0.0rc1`; no `v1.0.0-rc.2` tag or release may
-  be created.
+- W10.5 自动性能、Migration、测试与 Package Gate 已通过；2026-09-27 源码桌面滚动
+  修复复验已由产品负责人确认通过。重新构建包的 ICU 冲突检查、Runtime Smoke 与
+  Packaged Flow 已通过，但最终打包桌面仍需人工操作验收。版本保持 `1.0.0rc1`，最终
+  打包桌面验收前不得创建 `v1.0.0-rc.2` Tag 或 Release。 / W10.5 automated
+  performance, migration, test, and package gates pass. On 2026-09-27, the
+  product owner confirmed that source-desktop re-acceptance of the scrolling
+  fix passed. The rebuilt package passes the ICU collision check, runtime smoke,
+  and packaged flow, but still requires hands-on final-package desktop
+  acceptance. Version remains `1.0.0rc1`; no `v1.0.0-rc.2` tag or release may be
+  created before final-package desktop acceptance.
 
 ## 实施顺序 / Implementation Order
 

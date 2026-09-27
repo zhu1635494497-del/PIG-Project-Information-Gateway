@@ -1,7 +1,7 @@
 # PIG Workbench W10 RC.2 资格报告 / RC.2 Qualification Report
 
 - 日期：2026-09-27 / Date: 2026-09-27
-- 状态：自动 Gate 已通过；首次源码桌面验收发现的滚动卡顿已修复，等待源码与打包桌面复验；复验前仍不得建立 `v1.0.0-rc.2` / Status: Automated gates pass; the scrolling stall found in the first source-desktop acceptance is fixed and awaits source/package re-acceptance; `v1.0.0-rc.2` must not be created before that re-acceptance
+- 状态：自动 Gate 与源码桌面复验已通过；等待最终打包桌面人工验收，在此之前仍不得建立 `v1.0.0-rc.2` / Status: Automated gates and source-desktop re-acceptance pass; final-package manual desktop acceptance remains pending, and `v1.0.0-rc.2` must not be created before it passes
 - 当前版本：`1.0.0rc1` / Current version: `1.0.0rc1`
 - 范围：W10.5 自动资格验证与人工验收准备 / Scope: W10.5 automated qualification and manual-acceptance preparation
 
@@ -47,6 +47,13 @@ focused suite reports `11 passed`, the full regression reports `176 passed, 95
 skipped`, and the rebuilt package passes the ICU collision check, runtime smoke,
 and packaged flow.
 
+2026-09-27，产品负责人使用真实桌面交互完成滚动修复复验并确认通过；此结果只关闭
+源码桌面 Gate，不替代最终打包桌面的人工操作验收。
+
+On 2026-09-27, the product owner completed hands-on re-acceptance of the
+scrolling fix and confirmed it passed. This closes only the source-desktop gate
+and does not replace hands-on acceptance of the final packaged desktop.
+
 ## 数据与安全语义 / Data and Safety Semantics
 
 本阶段未增加业务实体或 Migration。Original 仍不可变；Working 仍是唯一可编辑副本；
@@ -65,7 +72,7 @@ copy-plus-hash.
 
 ## 尚未通过的 Gate / Open Gates
 
-- [ ] 使用滚动修复重新完成源码桌面真实数据验收。 / Repeat source-desktop real-data acceptance with the scrolling fix.
+- [x] 使用滚动修复重新完成源码桌面真实数据验收（2026-09-27）。 / Source-desktop real-data re-acceptance with the scrolling fix completed (2026-09-27).
 - [ ] 使用同一修复重新完成最终打包桌面真实数据验收。 / Repeat final-package real-data acceptance with the same fix.
 - [ ] W9 License、Signing、Clean-host、真实 RAR 与最终签名包 Gate 继续保持。 / Keep
   the W9 license, signing, clean-host, real-RAR, and final signed-package gates.
