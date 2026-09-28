@@ -407,15 +407,17 @@ not stop responding because it constructs every widget eagerly.
   95 skipped`, with one expected duplicate-ZIP warning. Migration head is
   `0008_workbench_recovery`, and the focused migration suite reports `4 passed`.
 - W10.5 自动性能、Migration、测试与 Package Gate 已通过；2026-09-27 源码桌面滚动
-  修复复验已由产品负责人确认通过。重新构建包的 ICU 冲突检查、Runtime Smoke 与
-  Packaged Flow 已通过，但最终打包桌面仍需人工操作验收。版本保持 `1.0.0rc1`，最终
-  打包桌面验收前不得创建 `v1.0.0-rc.2` Tag 或 Release。 / W10.5 automated
+  修复复验已由产品负责人确认通过，2026-09-28 最终打包桌面人工验收也已通过。
+  重新构建包的 ICU 冲突检查、Runtime Smoke 与 Packaged Flow 均通过。版本已更新为
+  `1.0.0rc2`，允许建立明确标记为未签名的 `v1.0.0-rc.2` GitHub Pre-release；W9
+  人工 Gate 继续阻止正式签名 V1 Release。 / W10.5 automated
   performance, migration, test, and package gates pass. On 2026-09-27, the
   product owner confirmed that source-desktop re-acceptance of the scrolling
-  fix passed. The rebuilt package passes the ICU collision check, runtime smoke,
-  and packaged flow, but still requires hands-on final-package desktop
-  acceptance. Version remains `1.0.0rc1`; no `v1.0.0-rc.2` tag or release may be
-  created before final-package desktop acceptance.
+  fix passed, and on 2026-09-28 the final packaged desktop also passed hands-on
+  acceptance. The rebuilt package passes the ICU collision check, runtime smoke,
+  and packaged flow. Version is now `1.0.0rc2`, allowing an explicitly unsigned
+  `v1.0.0-rc.2` GitHub pre-release; the W9 human gates continue to block the
+  formal signed V1 release.
 
 ## 实施顺序 / Implementation Order
 

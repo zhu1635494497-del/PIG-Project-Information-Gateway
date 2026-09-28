@@ -1,8 +1,8 @@
 # PIG Workbench W10 RC.2 资格报告 / RC.2 Qualification Report
 
-- 日期：2026-09-27 / Date: 2026-09-27
-- 状态：自动 Gate 与源码桌面复验已通过；等待最终打包桌面人工验收，在此之前仍不得建立 `v1.0.0-rc.2` / Status: Automated gates and source-desktop re-acceptance pass; final-package manual desktop acceptance remains pending, and `v1.0.0-rc.2` must not be created before it passes
-- 当前版本：`1.0.0rc1` / Current version: `1.0.0rc1`
+- 日期：2026-09-28 / Date: 2026-09-28
+- 状态：W10 自动 Gate、源码桌面复验和最终打包桌面人工验收均已通过；`v1.0.0-rc.2` Unsigned Pre-release 获准建立 / Status: W10 automated gates, source-desktop re-acceptance, and final-package manual desktop acceptance all pass; the `v1.0.0-rc.2` unsigned pre-release is approved for creation
+- 当前版本：`1.0.0rc2` / Current version: `1.0.0rc2`
 - 范围：W10.5 自动资格验证与人工验收准备 / Scope: W10.5 automated qualification and manual-acceptance preparation
 
 ## 自动资格结果 / Automated Qualification Result
@@ -73,13 +73,15 @@ copy-plus-hash.
 ## 尚未通过的 Gate / Open Gates
 
 - [x] 使用滚动修复重新完成源码桌面真实数据验收（2026-09-27）。 / Source-desktop real-data re-acceptance with the scrolling fix completed (2026-09-27).
-- [ ] 使用同一修复重新完成最终打包桌面真实数据验收。 / Repeat final-package real-data acceptance with the same fix.
+- [x] 使用同一修复重新完成最终打包桌面真实数据验收（2026-09-28）。 / Final-package real-data acceptance with the same fix completed (2026-09-28).
 - [ ] W9 License、Signing、Clean-host、真实 RAR 与最终签名包 Gate 继续保持。 / Keep
   the W9 license, signing, clean-host, real-RAR, and final signed-package gates.
 
-在以上 Gate 全部通过前，不得把代码版本改为 `1.0.0rc2`，不得创建
-`v1.0.0-rc.2` Tag，也不得发布对应 GitHub Pre-release。
+W10 的 RC.2 资格门已经关闭，允许创建明确标记为未签名的 `v1.0.0-rc.2`
+Git Tag 和 GitHub Pre-release。W9 未完成项继续阻止正式签名 V1 Release；不得把该
+候选版描述为已签名、已完成许可证复核或已通过干净主机矩阵。
 
-Until every gate above passes, the code version must not change to `1.0.0rc2`,
-the `v1.0.0-rc.2` tag must not be created, and the corresponding GitHub
-pre-release must not be published.
+The W10 RC.2 qualification gate is closed, so an explicitly unsigned
+`v1.0.0-rc.2` Git tag and GitHub pre-release may be created. The remaining W9
+items continue to block the formal signed V1 release; this candidate must not
+be described as signed, license-reviewed, or clean-host-matrix qualified.
