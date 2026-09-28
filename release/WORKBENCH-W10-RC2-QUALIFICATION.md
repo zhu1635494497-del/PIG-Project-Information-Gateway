@@ -1,7 +1,7 @@
 # PIG Workbench W10 RC.2 资格报告 / RC.2 Qualification Report
 
 - 日期：2026-09-28 / Date: 2026-09-28
-- 状态：W10 自动 Gate、源码桌面复验和最终打包桌面人工验收均已通过；`v1.0.0-rc.2` Unsigned Pre-release 获准建立 / Status: W10 automated gates, source-desktop re-acceptance, and final-package manual desktop acceptance all pass; the `v1.0.0-rc.2` unsigned pre-release is approved for creation
+- 状态：W10 自动 Gate、源码桌面复验和最终打包桌面人工验收均已通过；`v1.0.0-rc.2` Unsigned Pre-release 已于 2026-09-28 发布 / Status: W10 automated gates, source-desktop re-acceptance, and final-package manual desktop acceptance all pass; the `v1.0.0-rc.2` unsigned pre-release was published on 2026-09-28
 - 当前版本：`1.0.0rc2` / Current version: `1.0.0rc2`
 - 范围：W10.5 自动资格验证与人工验收准备 / Scope: W10.5 automated qualification and manual-acceptance preparation
 
@@ -69,6 +69,13 @@ staging publication. Working-version hard links apply only to immutable
 checkpoints and are published after full SHA-256 verification. The editable
 Working file never shares that link, and unsupported filesystems fall back to
 copy-plus-hash.
+
+## 发布结果 / Publication Result
+
+- Tag：`v1.0.0-rc.2`，Commit `842e04c25258c807a286fdfb50799d4a1d883abd`。 / Tag: `v1.0.0-rc.2`, commit `842e04c25258c807a286fdfb50799d4a1d883abd`.
+- GitHub Pre-release：`https://github.com/zhu1635494497-del/PIG-Project-Information-Gateway/releases/tag/v1.0.0-rc.2`。 / GitHub pre-release: `https://github.com/zhu1635494497-del/PIG-Project-Information-Gateway/releases/tag/v1.0.0-rc.2`.
+- Windows ZIP SHA-256：`5c38befd9dbeaa9256cc4a68cbbcde4814998949f13bb18bf110fbb4cb936365`。 / Windows ZIP SHA-256: `5c38befd9dbeaa9256cc4a68cbbcde4814998949f13bb18bf110fbb4cb936365`.
+- 构建明确保持 Unsigned Pre-release；W9 人工 Gate 未被此次发布替代。 / The build remains explicitly labeled as an unsigned pre-release; publication does not replace the open W9 human gates.
 
 ## 尚未通过的 Gate / Open Gates
 

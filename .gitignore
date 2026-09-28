@@ -25,6 +25,7 @@ runtime/
 # Build and package output
 build/
 dist/
+PIG-v*-windows-x64-unsigned.zip*
 *.spec.bak
 
 # Machine-specific generated release evidence

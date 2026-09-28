@@ -2,7 +2,7 @@
 
 - 状态：发布资格实施中；正式外发仍阻断 / Status: release qualification in progress; official distribution remains blocked
 - 目标：Windows x64 Portable `onedir` ZIP / Target: Windows x64 portable `onedir` ZIP
-- 当前版本：`1.0.0rc1`（Git Tag `v1.0.0-rc.1`）Pre-release / Current version: `1.0.0rc1` pre-release with Git tag `v1.0.0-rc.1`
+- 当前版本：`1.0.0rc2`（Git Tag `v1.0.0-rc.2`）Unsigned Pre-release / Current version: `1.0.0rc2` unsigned pre-release with Git tag `v1.0.0-rc.2`
 
 ## 源码仓库门 / Source repository gates
 
@@ -26,7 +26,7 @@
 - [x] Runtime Smoke 与当前 Workbench Packaged Flow 已在开发主机通过。 / Runtime smoke and the current Workbench packaged flow passed on the development host.
 - [x] Package Inventory 确认不捆绑 `7z.exe`。 / Package inventory confirms that `7z.exe` is not bundled.
 - [x] GitHub Actions CI 已在修复测试主机依赖后远程通过（`3caddb7`：`148 passed, 93 skipped, 1 warning`）。 / GitHub Actions CI passed remotely after isolating the host-dependent test (`3caddb7`: `148 passed, 93 skipped, 1 warning`).
-- [ ] GitHub Actions Unsigned Internal RC 首次远程运行通过。 / The first remote GitHub Actions unsigned Internal RC run passes.
+- [x] GitHub Actions Unsigned Internal RC 已在 `842e04c` 通过；测试、依赖证据、Windows Build、Smoke、Packaged Flow、ZIP 和 Artifact 均成功。 / GitHub Actions unsigned Internal RC passes at `842e04c`; tests, dependency evidence, Windows build, smoke, packaged flow, ZIP, and artifact upload all succeed.
 
 ## 人工许可证与签名门 / Human license and signing gates
 
