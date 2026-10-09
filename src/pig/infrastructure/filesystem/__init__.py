@@ -15,6 +15,7 @@ from pig.infrastructure.filesystem.workbench_storage import (
     LocalInspectionCacheStore,
     LocalWorkingArtifactStore,
 )
+from pig.infrastructure.filesystem.context_object_store import LocalContextObjectStore
 from pig.infrastructure.filesystem.working_version_store import LocalWorkingVersionStore
 from pig.infrastructure.filesystem.import_undo_store import LocalImportUndoStore
 from pig.infrastructure.filesystem.workspace_export_store import LocalWorkspaceExportStore
@@ -28,6 +29,7 @@ __all__ = [
     "LocalInspectionCache",
     "LocalInspectionCacheStore",
     "LocalWorkingArtifactStore",
+    "LocalContextObjectStore",
     "LocalWorkingVersionStore",
     "LocalImportUndoStore",
     "LocalWorkspaceExportStore",

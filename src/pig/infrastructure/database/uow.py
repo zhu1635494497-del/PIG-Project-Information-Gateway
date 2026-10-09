@@ -15,6 +15,8 @@ from pig.infrastructure.database.workbench_repositories import (
     SqlAlchemyRecoveryRepository,
     SqlAlchemyWorkspaceRepository,
 )
+from pig.infrastructure.database.context_repositories import SqlAlchemyContextRepository
+from pig.infrastructure.database.context_pack_repositories import SqlAlchemyContextPackRepository
 
 
 class SqlAlchemyUnitOfWork:
@@ -32,6 +34,8 @@ class SqlAlchemyUnitOfWork:
         self.catalog = SqlAlchemyCatalogRepository(self.session)
         self.processing = SqlAlchemyProcessingRepository(self.session)
         self.recovery = SqlAlchemyRecoveryRepository(self.session)
+        self.context = SqlAlchemyContextRepository(self.session)
+        self.context_packs = SqlAlchemyContextPackRepository(self.session)
         return self
 
     def __exit__(

@@ -72,7 +72,7 @@ from pig.domain.enums import (
     WorkspaceMaterializationStatus,
 )
 from pig.domain.exceptions import EntityNotFoundError
-from pig.domain.model_version import WORKBENCH_MODEL_VERSION
+from pig.domain.model_version import CURRENT_PROJECT_MODEL_VERSION
 from pig.domain.paths import archive_child_path, folder_child_path, logical_segment, safe_display_name
 from pig.domain.processing_policy import ProcessingPolicy
 from pig.infrastructure.filesystem.staging_manifest import finalize_staging_manifest
@@ -1083,6 +1083,80 @@ class WorkbenchStructureService:
                 allow_replace=allow_replace,
             )
 
+    def produce_source_content(
+        self,
+        *,
+        project_id: str,
+        database_path: Path,
+        workspace_item_id: str,
+        operation_id: str,
+        policy: ProcessingPolicy,
+        output: BinaryIO,
+    ) -> str:
+        """Stream immutable Source bytes without creating a Working Artifact."""
+        project_id = self._required(project_id, "project_id")
+        database_path = self._absolute(database_path)
+        project_path = database_path.resolve(strict=False).parent
+        operation_id = self._required(operation_id, "operation_id")
+        with self._database.unit_of_work(database_path) as uow:
+            project = self._project(uow, project_id, database_path)
+            item = uow.workspace.get_item(workspace_item_id)
+            if (
+                item is None
+                or item.project_id != project_id
+                or item.item_kind != WorkspaceItemKind.FILE
+                or item.origin_source_node_id is None
+                or not uow.workspace.is_effectively_active(item.id)
+            ):
+                raise ApplicationError(
+                    "CONTEXT_CAPTURE_SOURCE_MISSING",
+                    "only active source-backed files can be captured",
+                )
+            if project.workspace_revision < 0:
+                raise ApplicationError(ErrorCode.INTERNAL_ERROR.value, "invalid workspace revision")
+            node = uow.catalog.get_node(item.origin_source_node_id)
+            if node is None or node.status != NodeProcessingStatus.SUCCESS:
+                raise ApplicationError(
+                    "CONTEXT_CAPTURE_SOURCE_UNREADABLE",
+                    "source node is not a successful terminal file",
+                )
+            source = uow.catalog.get_source(node.source_id)
+            if source is None or source.root_node_id is None:
+                raise ApplicationError(ErrorCode.INTERNAL_ERROR.value, "source root is missing")
+            chain = self._relationship_chain(uow, source.root_node_id, node.id)
+            root_entry = next(
+                (
+                    entry
+                    for entry in uow.imports.entries_for_snapshot(source.snapshot_id)
+                    if entry.source_node_id == source.root_node_id
+                ),
+                None,
+            )
+            root_artifact = (
+                None
+                if root_entry is None or root_entry.artifact_id is None
+                else uow.imports.get_original_artifact(root_entry.artifact_id)
+            )
+            locator_chain = tuple(
+                (
+                    relationship,
+                    uow.catalog.entry_locator_for_relationship(relationship.id),
+                )
+                for relationship in chain
+            )
+
+        with self._inspection_cache.begin(project_path, operation_id) as cache:
+            producer = self._materialization_producer(
+                database_path=database_path,
+                project_path=project_path,
+                root_artifact=root_artifact,
+                locator_chain=locator_chain,
+                cache=cache,
+                policy=policy,
+            )
+            producer(output)
+        return node.id
+
     def _plan_source(
         self,
         *,
@@ -2020,7 +2094,7 @@ class WorkbenchStructureService:
         project = uow.projects.get(project_id)
         if project is None:
             raise EntityNotFoundError(f"project not found: {project_id}")
-        if project.model_version != WORKBENCH_MODEL_VERSION:
+        if project.model_version != CURRENT_PROJECT_MODEL_VERSION:
             raise ApplicationError(
                 "UNSUPPORTED_PROJECT_MODEL_VERSION", "unsupported Project data model"
             )

@@ -1,8 +1,15 @@
 # PIG V1 当前规划索引 / PIG V1 Active Planning Index
 
-- 当前日期：2026-09-27 / Date: 2026-09-27
-- 当前阶段：Workbench W10.5 自动资格 Gate 与源码桌面复验已通过；RC.2 等待最终打包桌面人工验收 / Current phase: Workbench W10.5 automated qualification gates and source-desktop re-acceptance pass; RC.2 is pending final-package manual desktop acceptance
+- 当前日期：2026-10-07 / Date: 2026-10-07
+- 当前阶段：V1 作为稳定 Workbench 基线保留；后续有效规划转入 `docs/PIG-V2-planning-index.md` / Current phase: V1 remains the stable Workbench baseline; subsequent active planning moves to `docs/PIG-V2-planning-index.md`
 - 代码授权：W1–W10；D92–D100 已批准，正式外发仍受人工 Gate 约束 / Code authorization: W1-W10; D92-D100 approved, with official distribution still gated by human review
+
+> 当前跨版本入口为 `docs/PIG-planning-index.md`。本文件继续记录 V1 权限、决策和
+> 历史实现，不授权任何 V2 代码。
+>
+> The cross-version entry point is now `docs/PIG-planning-index.md`. This file
+> continues to record V1 authority, decisions, and implementation history and
+> does not authorize V2 code.
 
 ## 当前规范优先级 / Active authority order
 

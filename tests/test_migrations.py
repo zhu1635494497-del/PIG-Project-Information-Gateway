@@ -37,6 +37,17 @@ EXPECTED_TABLES = {
     "working_revisions",
     "recovery_runs",
     "recovery_items",
+    "context_settings",
+    "context_sections",
+    "context_items",
+    "context_placements",
+    "context_content_objects",
+    "context_revisions",
+    "context_annotations",
+    "context_pack_exports",
+    "context_pack_entries",
+    "context_pack_sections",
+    "context_pack_placements",
 }
 
 
@@ -68,7 +79,7 @@ def test_upgrade_creates_the_complete_initial_schema(database_path: Path) -> Non
             )
         )
 
-    assert revision == "0008_workbench_recovery"
+    assert revision == "0013_context_pack_events"
     project_columns = {
         column["name"] for column in schema.get_columns("projects")
     }
@@ -76,6 +87,7 @@ def test_upgrade_creates_the_complete_initial_schema(database_path: Path) -> Non
         column["name"] for column in schema.get_columns("import_sessions")
     }
     assert "workspace_revision" in project_columns
+    assert "context_revision" in project_columns
     assert {
         "target_workspace_parent_id",
         "expected_workspace_revision",
@@ -88,9 +100,20 @@ def test_upgrade_creates_the_complete_initial_schema(database_path: Path) -> Non
     assert "trg_workspace_placement_cycle_update" in triggers
     assert "trg_source_entry_locators_immutable_update" in triggers
     assert "trg_source_entry_locators_immutable_delete" in triggers
+    assert "trg_projects_model_version_transition" in triggers
 
 
 def test_migration_matches_current_sqlalchemy_metadata(database_path: Path) -> None:
+    command.check(alembic_config(database_path))
+
+
+def test_v221_database_upgrades_to_v22_events(tmp_path: Path) -> None:
+    database_path = tmp_path / "v221-to-v22.sqlite"
+    upgrade_database(database_path, "0012_context_pack_contract")
+    upgrade_database(database_path)
+    engine = create_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0013_context_pack_events"
     command.check(alembic_config(database_path))
 
 

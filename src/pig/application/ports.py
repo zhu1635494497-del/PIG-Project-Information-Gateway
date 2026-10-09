@@ -351,6 +351,37 @@ class WorkspaceExportStore(Protocol):
     ) -> StoredWorkspaceExport: ...
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ContextPackFile:
+    relative_path: str
+    object_key: str
+    size_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PublishedContextPack:
+    destination_path: Path
+    sha256: str
+    size_bytes: int
+
+
+class ContextPackStore(Protocol):
+    def validate_destination(self, project_path: Path, destination: Path) -> Path: ...
+
+    def available_space(self, destination: Path) -> int: ...
+
+    def verify_source(self, project_path: Path, entry: ContextPackFile, *, chunk_size: int, control=None) -> Path: ...
+
+    def publish(
+        self, project_path: Path, destination: Path, export_id: str,
+        files: Sequence[ContextPackFile], readme: bytes, manifest: bytes,
+        *, pack_format: str, chunk_size: int, control=None,
+    ) -> PublishedContextPack: ...
+
+    def remove_owned_publication(self, destination: Path, export_id: str, expected_sha256: str) -> bool: ...
+
+
 class ImportUndoStorageSession(Protocol):
     @property
     def removed_size(self) -> int: ...
@@ -492,6 +523,76 @@ class ProjectDatabaseProvider(Protocol):
     def unit_of_work(
         self, database_path: Path
     ) -> AbstractContextManager[UnitOfWork]: ...
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProjectUpgradeInspection:
+    project_id: str
+    project_name: str
+    workspace_locator: str
+    model_version: str
+    schema_revision: str
+    integrity_ok: bool
+    v1_row_counts: dict[str, int]
+
+
+class ProjectUpgradeStore(Protocol):
+    def inspect(self, database_path: Path) -> ProjectUpgradeInspection: ...
+
+    def backup(
+        self,
+        database_path: Path,
+        *,
+        occurred_at: datetime,
+    ) -> Path: ...
+
+    def migrate(self, database_path: Path) -> None: ...
+
+    def validate(
+        self,
+        database_path: Path,
+        *,
+        expected_v1_row_counts: dict[str, int],
+    ) -> ProjectUpgradeInspection: ...
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StoredContextObject:
+    object_key: str
+    path: Path
+    size: int
+    sha256: str
+    reused: bool
+
+
+class ContextObjectStore(Protocol):
+    def available_space(self, project_path: Path) -> int: ...
+
+    def capture(
+        self,
+        project_path: Path,
+        operation_id: str,
+        producer: Callable[[BinaryIO], None],
+        *,
+        maximum: int,
+        control=None,
+    ) -> StoredContextObject: ...
+
+    def inspect(
+        self,
+        project_path: Path,
+        *,
+        known_object_keys: frozenset[str],
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]: ...
+
+    def remove(
+        self,
+        project_path: Path,
+        object_key: str,
+        *,
+        expected_size: int,
+        expected_sha256: str,
+    ) -> bool: ...
 
 
 class SourceInspector(Protocol):

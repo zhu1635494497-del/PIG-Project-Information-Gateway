@@ -27,6 +27,16 @@ builds an editable Workspace Tree. Files can then be searched, moved, added,
 deleted, restored, opened, edited, and exported without repeatedly unpacking
 archives, saving attachments, and navigating intermediate folders by hand.
 
+当前开发中的 V2 在 V1 工作台上增加 Project Context：用户选择少量核心文件，固定
+不可变 Revision，编写人工说明，并导出离线 Context Pack（目录或 ZIP）。该能力仍处于
+源码与合成数据验收阶段；公开 V1 Release 不应被视为已包含 V2。V2 当前不调用 AI。
+
+V2 development adds Project Context on top of the V1 workbench: users select
+core files, fix immutable Revisions, write human guidance, and export an offline
+Context Pack as a directory or ZIP. This capability is still at source and
+synthetic-data acceptance; the public V1 Release should not be assumed to
+contain V2. V2 does not currently invoke AI.
+
 
 ## 长期目标 / Long-Term Goal
 

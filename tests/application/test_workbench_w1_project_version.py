@@ -9,7 +9,7 @@ from pig.application.errors import ApplicationError
 from pig.bootstrap import create_local_application
 from pig.domain.entities import Project
 from pig.domain.enums import ProjectStatus
-from pig.domain.model_version import WORKBENCH_MODEL_VERSION
+from pig.domain.model_version import CURRENT_PROJECT_MODEL_VERSION
 from pig.infrastructure.database.engine import create_project_engine, session_factory
 from pig.infrastructure.database.migrations import upgrade_database
 from pig.infrastructure.database.uow import SqlAlchemyUnitOfWork
@@ -26,7 +26,7 @@ def test_new_project_uses_workbench_model_and_reloads(tmp_path) -> None:
     )
 
     assert loaded.project.id == created.project_id
-    assert loaded.project.model_version == WORKBENCH_MODEL_VERSION
+    assert loaded.project.model_version == CURRENT_PROJECT_MODEL_VERSION
     assert loaded.sources == ()
     assert [event.event_type.value for event in loaded.events] == [
         "PROJECT_CREATED"
@@ -63,4 +63,4 @@ def test_old_project_model_is_rejected_clearly(tmp_path) -> None:
 
     assert error.value.code == "UNSUPPORTED_PROJECT_MODEL_VERSION"
     assert error.value.details["actual_model_version"] == "1"
-    assert error.value.details["supported_model_version"] == WORKBENCH_MODEL_VERSION
+    assert error.value.details["supported_model_version"] == CURRENT_PROJECT_MODEL_VERSION

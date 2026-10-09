@@ -26,7 +26,7 @@ from pig.domain.enums import (
     WorkspaceItemLifecycleStatus,
 )
 from pig.domain.exceptions import EntityNotFoundError
-from pig.domain.model_version import WORKBENCH_MODEL_VERSION
+from pig.domain.model_version import CURRENT_PROJECT_MODEL_VERSION
 
 
 Clock = Callable[[], datetime]
@@ -375,7 +375,7 @@ class ImportUndoService:
         project = uow.projects.get(project_id)
         if project is None:
             raise EntityNotFoundError(f"project not found: {project_id}")
-        if project.model_version != WORKBENCH_MODEL_VERSION:
+        if project.model_version != CURRENT_PROJECT_MODEL_VERSION:
             raise ApplicationError(
                 "UNSUPPORTED_PROJECT_MODEL_VERSION", "unsupported Project data model"
             )

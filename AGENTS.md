@@ -17,18 +17,22 @@ Before planning, designing, coding, reviewing, or testing any non-trivial change
    Automation 和 UI 影响。
    State the Domain, Flow, State, Lineage, Log, Permission, Tool, AI,
    Automation, and UI impact before implementation.
-4. 遵守 `ADR-001` 和 V1 Workbench 重置 `ADR-010`；使用
-   `docs/PIG-V1-planning-index.md` 判断当前文档和历史文档。
-   Respect `ADR-001` and the V1 Workbench reset `ADR-010`; use
-   `docs/PIG-V1-planning-index.md` to resolve active versus historical documents.
-5. 未经用户明确批准不得越过当前 Milestone。Workbench W9 的 D78–D91 已批准；允许
-   本地 Git、公开仓库准备、CI 与 Unsigned Internal RC。首次公开 Push 仍需精确文件
-   清单和最终确认；正式 V1 Release 仍需全部人工 Gate，W9 不实施 V2。
-   Do not advance beyond the explicitly authorized milestone. Workbench W9
-   D78-D91 are approved, allowing local Git, public-repository preparation, CI,
-   and unsigned Internal RCs. The first public push still requires an exact file
-   inventory and final confirmation; every human gate remains mandatory for an
-   official V1 Release, and W9 does not implement V2.
+4. 遵守 `ADR-001`、V1 Workbench 重置 `ADR-010`、V2 基础决策 `ADR-024` 和
+   V2.1 决策 `ADR-025`；使用
+   `docs/PIG-planning-index.md` 判断当前文档和历史文档。
+   Respect `ADR-001`, the V1 Workbench reset `ADR-010`, the V2 foundation
+   decision `ADR-024`, and the V2.1 decision `ADR-025`; use
+   `docs/PIG-planning-index.md` to resolve active versus historical documents.
+5. 未经用户明确批准不得越过当前 Milestone。V2.1.5 已通过本轮验收；D120-A 至
+   D126-A 已批准。用户随后明确授权一次性完成 V2.2.2–V2.2.4，包括目录/ZIP
+   发布、最小 UI 与合成数据验收。不得提前实施内容解析、AI/RAG 依赖或 V2.3。
+   旧 V1 数据库适配未在 V2.1.5 验收。
+   Do not advance beyond the explicitly authorized milestone. V2.1.5 passed
+   this acceptance run and D120-A through D126-A are approved. The user then
+   explicitly authorized V2.2.2–V2.2.4 together: directory/ZIP publication,
+   minimum UI, and synthetic-data acceptance. Do not implement content
+   extraction, AI/RAG dependencies, or V2.3 early. Old V1 database adaptation
+   was not accepted in V2.1.5.
 6. 完成有意义的工作后，按照 `PIG Project Rules.md` 第十五节汇报。
    After meaningful work, report the completion items required by section 15 of
    `PIG Project Rules.md`.

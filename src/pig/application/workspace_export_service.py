@@ -38,7 +38,7 @@ from pig.domain.enums import (
     WorkspaceExportKind,
 )
 from pig.domain.exceptions import EntityNotFoundError, InvariantViolationError
-from pig.domain.model_version import WORKBENCH_MODEL_VERSION
+from pig.domain.model_version import CURRENT_PROJECT_MODEL_VERSION
 from pig.domain.paths import safe_filesystem_segment
 
 
@@ -532,7 +532,7 @@ class WorkspaceExportService:
 
     @staticmethod
     def _project(project, database_path: Path) -> None:
-        if project.model_version != WORKBENCH_MODEL_VERSION:
+        if project.model_version != CURRENT_PROJECT_MODEL_VERSION:
             raise ApplicationError(
                 "UNSUPPORTED_PROJECT_MODEL_VERSION", "unsupported Project data model"
             )

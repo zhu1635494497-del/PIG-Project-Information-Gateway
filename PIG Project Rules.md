@@ -33,6 +33,12 @@ Raw Files
 
 除非任务明确要求，否则不要提前实现 AI、RAG、OCR、知识图谱等后期能力。
 
+当前演进阶段为 **V2.2 Context Pack 实施与验收**；V2.1.5 已通过合成数据自动测试和用户人工桌面验收。V1 Workbench 是稳定底座；
+`ADR-024` 的 D101-A 至 D112-A、`ADR-025` 的 D113-A 至 D119-B，以及
+`ADR-026` 的 D120-A 至 D126-A 已批准。用户随后明确授权一次性完成 V2.2.2–V2.2.4
+的目录/ZIP 发布、最小 UI 与合成数据验收。旧 V1 数据库适配未纳入 V2.1.5 验收。
+不得提前实施 V2.3、内容解析或第三方 AI/RAG 依赖。
+
 ---
 
 # 一、基础规则
@@ -1493,6 +1499,15 @@ V1 excludes OCR, RAG, LLM analysis, AI chat, Knowledge Graph, ERP integration,
 cloud sync, multi-user collaboration, complex RBAC, enterprise dashboards,
 transparent archive repack, MSG/EML write-back, and full document history beyond
 the current version plus one previous Working version.
+
+The current evolution phase is **V2.2 Context Pack implementation and acceptance**; V2.1.5
+passed synthetic automated tests and user-reported manual desktop acceptance. V1 Workbench
+remains the stable foundation. ADR-024 decisions D101-A through D112-A and
+ADR-025 decisions D113-A through D119-B and ADR-026 decisions D120-A through
+D126-A are approved. Old V1 database adaptation was not accepted in V2.1.5.
+The user subsequently authorized V2.2.2–V2.2.4 together, including
+directory/ZIP publication, minimum UI, and synthetic-data acceptance. V2.3,
+content extraction, and third-party AI/RAG dependencies remain unauthorized.
 
 ## Final principle
 

@@ -38,6 +38,13 @@ from pig.domain.enums import (
     WorkspaceItemKind,
     WorkspaceItemLifecycleStatus,
     WorkspaceMaterializationStatus,
+    ContextAnnotationKind,
+    ContextContentObjectStatus,
+    ContextLifecycleStatus,
+    ContextRevisionCaptureStatus,
+    ContextRevisionSourceKind,
+    ContextPackFormat,
+    ContextPackExportStatus,
 )
 
 
@@ -52,6 +59,168 @@ class Project:
     updated_at: datetime
     description: Optional[str] = None
     workspace_revision: int = 0
+    context_revision: int = 0
+
+
+@dataclass(slots=True, kw_only=True)
+class ContextSettings:
+    project_id: str
+    soft_quota_bytes: int
+    minimum_free_bytes: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True, kw_only=True)
+class ContextSection:
+    id: str
+    project_id: str
+    name: str
+    ordinal: int
+    lifecycle_status: ContextLifecycleStatus
+    created_at: datetime
+    updated_at: datetime
+    description: Optional[str] = None
+    removed_at: Optional[datetime] = None
+
+
+@dataclass(slots=True, kw_only=True)
+class ContextItem:
+    id: str
+    project_id: str
+    workspace_item_id: str
+    lifecycle_status: ContextLifecycleStatus
+    created_at: datetime
+    updated_at: datetime
+    title_override: Optional[str] = None
+    purpose: Optional[str] = None
+    current_context_revision_id: Optional[str] = None
+    removed_at: Optional[datetime] = None
+
+
+@dataclass(slots=True, kw_only=True)
+class ContextPlacement:
+    id: str
+    project_id: str
+    context_item_id: str
+    context_section_id: str
+    ordinal: int
+    lifecycle_status: ContextLifecycleStatus
+    created_at: datetime
+    updated_at: datetime
+    removed_at: Optional[datetime] = None
+
+
+@dataclass(slots=True, kw_only=True)
+class ContextContentObject:
+    id: str
+    project_id: str
+    sha256: str
+    size_bytes: int
+    object_key: str
+    availability_status: ContextContentObjectStatus
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True, kw_only=True)
+class ContextRevision:
+    id: str
+    project_id: str
+    context_item_id: str
+    source_kind: ContextRevisionSourceKind
+    captured_workspace_revision: int
+    capture_status: ContextRevisionCaptureStatus
+    is_manually_protected: bool
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+    content_object_id: Optional[str] = None
+    source_working_artifact_id: Optional[str] = None
+    source_node_id: Optional[str] = None
+    source_observed_sha256: Optional[str] = None
+    protection_reason: Optional[str] = None
+    ready_at: Optional[datetime] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+@dataclass(slots=True, kw_only=True)
+class ContextAnnotation:
+    id: str
+    project_id: str
+    context_item_id: str
+    kind: ContextAnnotationKind
+    body: str
+    author: str
+    created_at: datetime
+    updated_at: datetime
+    context_revision_id: Optional[str] = None
+
+
+@dataclass(slots=True, kw_only=True)
+class ContextPackExport:
+    id: str
+    project_id: str
+    format: ContextPackFormat
+    status: ContextPackExportStatus
+    destination_locator: str
+    actor: str
+    correlation_id: str
+    captured_context_revision: int
+    manifest_schema_version: str
+    plan_fingerprint: str
+    entry_count: int
+    total_bytes: int
+    created_at: datetime
+    updated_at: datetime
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    published_sha256: Optional[str] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+@dataclass(slots=True, kw_only=True)
+class ContextPackEntry:
+    id: str
+    project_id: str
+    export_id: str
+    context_item_id: str
+    context_revision_id: str
+    ordinal: int
+    relative_path: str
+    display_name: str
+    size_bytes: int
+    sha256: str
+    created_at: datetime
+    purpose_snapshot: Optional[str] = None
+    guidance_body_snapshot: Optional[str] = None
+    guidance_author_snapshot: Optional[str] = None
+
+
+@dataclass(slots=True, kw_only=True)
+class ContextPackSection:
+    id: str
+    project_id: str
+    export_id: str
+    source_section_id: Optional[str]
+    name_snapshot: str
+    ordinal: int
+    is_unsectioned: bool
+    created_at: datetime
+    description_snapshot: Optional[str] = None
+
+
+@dataclass(slots=True, kw_only=True)
+class ContextPackPlacement:
+    id: str
+    project_id: str
+    export_id: str
+    entry_id: str
+    section_id: str
+    ordinal: int
+    created_at: datetime
 
 
 @dataclass(slots=True, kw_only=True)
@@ -393,6 +562,11 @@ class ProcessingEvent:
     snapshot_id: Optional[str] = None
     workspace_item_id: Optional[str] = None
     working_artifact_id: Optional[str] = None
+    context_section_id: Optional[str] = None
+    context_item_id: Optional[str] = None
+    context_content_object_id: Optional[str] = None
+    context_revision_id: Optional[str] = None
+    context_annotation_id: Optional[str] = None
     previous_status: Optional[str] = None
     new_status: Optional[str] = None
     error_code: Optional[ErrorCode] = None

@@ -73,6 +73,7 @@ from pig.application import (
 from pig.application.errors import ApplicationError
 from pig.domain.enums import (
     NodeFormat,
+    NodeKind,
     WorkingContentStatus,
     WorkingRefreshReason,
     WorkspaceItemKind,
@@ -80,6 +81,7 @@ from pig.domain.enums import (
 )
 from pig.domain.paths import safe_filesystem_segment
 from pig.ui.theme import apply_workbench_theme
+from pig.ui.context_view import ProjectContextView
 
 T = TypeVar("T")
 ITEM_ID_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -863,7 +865,18 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 5)
         splitter.setSizes([840, 520])
         layout.addWidget(splitter, 1)
-        self.setCentralWidget(root)
+        self.context_view = ProjectContextView(
+            self._application,
+            actor=self._actor,
+            run_background=self._run_background,
+            show_failure=self._show_failure,
+        )
+        self.mode_tabs = QTabWidget()
+        self.mode_tabs.setObjectName("projectModeTabs")
+        self.mode_tabs.addTab(root, "Workspace")
+        self.mode_tabs.addTab(self.context_view, "Project Context")
+        self.mode_tabs.currentChanged.connect(self._project_mode_changed)
+        self.setCentralWidget(self.mode_tabs)
         for widget in (
             self.search_text,
             self.search_results,
@@ -970,6 +983,7 @@ class MainWindow(QMainWindow):
     def _project_loaded(self, project_id: str, database_path: Path) -> None:
         self._project_id = project_id
         self._database_path = Path(database_path)
+        self.context_view.set_project(project_id, database_path)
         self._recovery_required = True
         self._set_project_state("检查恢复状态", "warning")
         self._set_project_actions_enabled(False)
@@ -1060,6 +1074,7 @@ class MainWindow(QMainWindow):
     def _activate_project(self, project_id: str, database_path: Path) -> None:
         self._project_id = project_id
         self._database_path = Path(database_path)
+        self.context_view.set_project(project_id, database_path)
         self._recovery_required = False
         self._recovery_inspection_token = None
         self._set_project_state("正在载入")
@@ -1553,6 +1568,7 @@ class MainWindow(QMainWindow):
     def _apply_workspace(self, result, events) -> None:
         selected_id = self.open_selected_button.property("workspace_item_id")
         self._workspace_revision = result.workspace_revision
+        self.context_view.update_workspace_revision(result.workspace_revision)
         self._views = {
             view.item.id: view for view in (*result.items, *result.deleted_items)
         }
@@ -1669,8 +1685,19 @@ class MainWindow(QMainWindow):
             return None
         menu = QMenu(self)
         selected_ids = self._selected_export_ids()
-        if view.item.item_kind == WorkspaceItemKind.FILE and len(selected_ids) == 1:
+        if (
+            view.item.item_kind == WorkspaceItemKind.FILE
+            and view.source_node is not None
+            and view.source_node.kind == NodeKind.FILE
+            and len(selected_ids) == 1
+        ):
             menu.addAction("打开", lambda: self._open_item(item_id))
+            menu.addAction(
+                "加入 Project Context",
+                lambda: self.context_view.promote_workspace_item(
+                    item_id, view.item.display_name
+                ),
+            )
             if view.working_artifact is not None:
                 menu.addAction("刷新文件状态", self._refresh_selected_file)
                 if view.working_artifact.content_status != WorkingContentStatus.CLEAN:
@@ -2001,10 +2028,17 @@ class MainWindow(QMainWindow):
             result = future.result()
         except BaseException as exc:
             self._show_failure(operation, exc)
-            if isinstance(exc, ApplicationError) and exc.code == (
-                "WORKSPACE_REVISION_CONFLICT"
-            ):
-                self._reload_workspace()
+            if isinstance(exc, ApplicationError):
+                if exc.code in {
+                    "WORKSPACE_REVISION_CONFLICT",
+                    "WORKSPACE_CHANGED_DURING_CAPTURE",
+                }:
+                    self._reload_workspace()
+                if exc.code in {
+                    "CONTEXT_WRITE_CONFLICT",
+                    "CONTEXT_CLEANUP_PREVIEW_STALE",
+                }:
+                    self.context_view.reload()
             return
         if success is not None:
             success(result)
@@ -2038,6 +2072,7 @@ class MainWindow(QMainWindow):
             not busy
             and self.restore_deleted_button.property("workspace_item_id") is not None
         )
+        self.context_view.set_busy(busy)
 
     def _set_project_actions_enabled(self, enabled: bool) -> None:
         enabled = enabled and not self._recovery_required
@@ -2089,7 +2124,9 @@ class MainWindow(QMainWindow):
             OperationStage.STRUCTURE_INSPECTION: "正在分析文件结构",
             OperationStage.EXPORT_PREPARATION: "正在准备导出",
             OperationStage.EXPORT_WRITE: "正在写入导出文件",
+            OperationStage.EXPORT_VERIFICATION: "正在校验导出文件",
             OperationStage.FINALIZING: "正在完成原子发布",
+            OperationStage.CONTEXT_CAPTURE: "正在捕获 Context Revision",
             OperationStage.COMPLETED: "操作完成",
         }
         ratio = snapshot.ratio
@@ -2114,6 +2151,14 @@ class MainWindow(QMainWindow):
         elif not snapshot.cancellable and snapshot.stage != OperationStage.COMPLETED:
             message += "（正在完成，暂不可取消）"
         self.statusBar().showMessage(message)
+
+    def _project_mode_changed(self, index: int) -> None:
+        if (
+            hasattr(self, "context_view")
+            and self.mode_tabs.widget(index) is self.context_view
+            and self._worker_thread is None
+        ):
+            self.context_view.activate()
 
     def event(self, event: QEvent) -> bool:
         result = super().event(event)

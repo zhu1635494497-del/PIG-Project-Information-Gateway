@@ -18,7 +18,15 @@ from pig.application.workspace_query_service import WorkspaceQueryService
 from pig.application.workspace_export_service import WorkspaceExportService
 from pig.application.import_undo_service import ImportUndoService
 from pig.application.workbench_recovery_service import WorkbenchRecoveryService
+from pig.application.project_upgrade_service import ProjectContextUpgradeService
+from pig.application.context_capture_service import ContextCaptureService
+from pig.application.context_action_service import ContextActionService
+from pig.application.context_query_service import ContextQueryService
+from pig.application.context_pack_plan_service import ContextPackPlanService
+from pig.application.context_pack_export_service import ContextPackExportService
+from pig.infrastructure.filesystem.context_pack_store import LocalContextPackStore
 from pig.infrastructure.database.provider import SqlAlchemyProjectDatabase
+from pig.infrastructure.database.project_upgrade import SqliteProjectUpgradeStore
 from pig.handlers import (
     ArchiveHandler,
     ContainerHandlerRegistry,
@@ -39,6 +47,7 @@ from pig.infrastructure.filesystem import (
     LocalOriginalSnapshotStore,
     LocalInspectionCacheStore,
     LocalWorkingArtifactStore,
+    LocalContextObjectStore,
     LocalWorkingVersionStore,
     LocalWorkspaceRecovery,
     LocalSourceInspector,
@@ -71,6 +80,12 @@ def create_local_application(
     effective_clock = clock or (lambda: datetime.now(timezone.utc))
     effective_id_generator = id_generator or (lambda: str(uuid4()))
     database = SqlAlchemyProjectDatabase()
+    project_upgrade_service = ProjectContextUpgradeService(
+        database=database,
+        store=SqliteProjectUpgradeStore(),
+        clock=effective_clock,
+        id_generator=effective_id_generator,
+    )
     source_inspector = LocalSourceInspector(clock=effective_clock)
     artifact_store = LocalArtifactStore()
     eml_handler = EmlHandler()
@@ -202,6 +217,25 @@ def create_local_application(
         clock=effective_clock,
         id_generator=effective_id_generator,
     )
+    context_object_store = LocalContextObjectStore()
+    context_capture_service = ContextCaptureService(
+        database=database,
+        store=context_object_store,
+        working_store=working_store,
+        working_file_service=working_file_service,
+        structure_service=structure_service,
+        clock=effective_clock,
+        id_generator=effective_id_generator,
+    )
+    context_action_service = ContextActionService(
+        database=database,
+        capture_service=context_capture_service,
+        object_store=context_object_store,
+        clock=effective_clock,
+        id_generator=effective_id_generator,
+    )
+    context_query_service = ContextQueryService(database=database)
+    context_pack_plan_service = ContextPackPlanService(database=database)
     return PigApplication(
         workspace=LocalWorkspaceManager(workspace_root),
         database=database,
@@ -218,6 +252,16 @@ def create_local_application(
         workspace_export_service=workspace_export_service,
         import_undo_service=import_undo_service,
         workbench_recovery_service=workbench_recovery_service,
+        project_upgrade_service=project_upgrade_service,
+        context_capture_service=context_capture_service,
+        context_action_service=context_action_service,
+        context_query_service=context_query_service,
+        context_pack_plan_service=context_pack_plan_service,
+        context_pack_export_service=ContextPackExportService(
+            database=database, plan_service=context_pack_plan_service,
+            store=LocalContextPackStore(), clock=effective_clock,
+            id_generator=effective_id_generator,
+        ),
         clock=effective_clock,
         id_generator=effective_id_generator,
     )

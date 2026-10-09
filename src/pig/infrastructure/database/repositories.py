@@ -35,6 +35,7 @@ def _project_from_model(row: models.ProjectModel) -> entities.Project:
         created_at=row.created_at,
         updated_at=row.updated_at,
         workspace_revision=row.workspace_revision,
+        context_revision=row.context_revision,
     )
 
 
@@ -218,6 +219,11 @@ def _event_from_model(row: models.ProcessingEventModel) -> entities.ProcessingEv
         snapshot_id=row.snapshot_id,
         workspace_item_id=row.workspace_item_id,
         working_artifact_id=row.working_artifact_id,
+        context_section_id=row.context_section_id,
+        context_item_id=row.context_item_id,
+        context_content_object_id=row.context_content_object_id,
+        context_revision_id=row.context_revision_id,
+        context_annotation_id=row.context_annotation_id,
         actor=row.actor,
         occurred_at=row.occurred_at,
         severity=row.severity,
@@ -245,6 +251,7 @@ class SqlAlchemyProjectRepository:
                 created_at=project.created_at,
                 updated_at=project.updated_at,
                 workspace_revision=project.workspace_revision,
+                context_revision=project.context_revision,
         )
         self._session.add(row)
         self._session.flush([row])
@@ -306,6 +313,70 @@ class SqlAlchemyProjectRepository:
             raise ConcurrentStateError(
                 "workspace revision changed concurrently: "
                 f"expected {expected_revision}, found {existing.workspace_revision}"
+            )
+        self._session.expire_all()
+        row = self._session.get(models.ProjectModel, project_id)
+        if row is None:  # pragma: no cover - guarded by the conditional update
+            raise EntityNotFoundError(f"project not found: {project_id}")
+        return _project_from_model(row)
+
+    def advance_context_revision(
+        self,
+        project_id: str,
+        expected_revision: int,
+        *,
+        updated_at: datetime,
+    ) -> entities.Project:
+        result = self._session.execute(
+            update(models.ProjectModel)
+            .where(
+                models.ProjectModel.id == project_id,
+                models.ProjectModel.context_revision == expected_revision,
+            )
+            .values(
+                context_revision=expected_revision + 1,
+                updated_at=updated_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            existing = self._session.get(models.ProjectModel, project_id)
+            if existing is None:
+                raise EntityNotFoundError(f"project not found: {project_id}")
+            raise ConcurrentStateError(
+                "context revision changed concurrently: "
+                f"expected {expected_revision}, found {existing.context_revision}"
+            )
+        self._session.expire_all()
+        row = self._session.get(models.ProjectModel, project_id)
+        if row is None:  # pragma: no cover - guarded by the conditional update
+            raise EntityNotFoundError(f"project not found: {project_id}")
+        return _project_from_model(row)
+
+    def update_model_version(
+        self,
+        project_id: str,
+        expected_version: str,
+        new_version: str,
+        *,
+        updated_at: datetime,
+    ) -> entities.Project:
+        result = self._session.execute(
+            update(models.ProjectModel)
+            .where(
+                models.ProjectModel.id == project_id,
+                models.ProjectModel.model_version == expected_version,
+            )
+            .values(model_version=new_version, updated_at=updated_at)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            existing = self._session.get(models.ProjectModel, project_id)
+            if existing is None:
+                raise EntityNotFoundError(f"project not found: {project_id}")
+            raise ConcurrentStateError(
+                "project model version changed concurrently: "
+                f"expected {expected_version}, found {existing.model_version}"
             )
         self._session.expire_all()
         row = self._session.get(models.ProjectModel, project_id)
@@ -1479,6 +1550,11 @@ class SqlAlchemyProcessingRepository:
                 snapshot_id=event.snapshot_id,
                 workspace_item_id=event.workspace_item_id,
                 working_artifact_id=event.working_artifact_id,
+                context_section_id=event.context_section_id,
+                context_item_id=event.context_item_id,
+                context_content_object_id=event.context_content_object_id,
+                context_revision_id=event.context_revision_id,
+                context_annotation_id=event.context_annotation_id,
                 actor=event.actor,
                 occurred_at=event.occurred_at,
                 severity=event.severity,
@@ -1507,6 +1583,11 @@ class SqlAlchemyProcessingRepository:
                 "snapshot_id": event.snapshot_id,
                 "workspace_item_id": event.workspace_item_id,
                 "working_artifact_id": event.working_artifact_id,
+                "context_section_id": event.context_section_id,
+                "context_item_id": event.context_item_id,
+                "context_content_object_id": event.context_content_object_id,
+                "context_revision_id": event.context_revision_id,
+                "context_annotation_id": event.context_annotation_id,
                 "actor": event.actor,
                 "occurred_at": event.occurred_at,
                 "severity": event.severity,

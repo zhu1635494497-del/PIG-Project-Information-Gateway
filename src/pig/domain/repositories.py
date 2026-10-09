@@ -28,10 +28,25 @@ from pig.domain.entities import (
     WorkingRevision,
     WorkspaceItem,
     WorkspacePlacement,
+    ContextAnnotation,
+    ContextContentObject,
+    ContextItem,
+    ContextPlacement,
+    ContextRevision,
+    ContextSection,
+    ContextSettings,
+    ContextPackExport,
+    ContextPackEntry,
+    ContextPackSection,
+    ContextPackPlacement,
 )
 from pig.domain.enums import (
     ArtifactIntegrityStatus,
     AttemptStatus,
+    ContextContentObjectStatus,
+    ContextLifecycleStatus,
+    ContextRevisionCaptureStatus,
+    ContextPackExportStatus,
     ImportSessionStatus,
     ImportItemStatus,
     JobStatus,
@@ -73,6 +88,178 @@ class ProjectRepository(Protocol):
         *,
         updated_at: datetime,
     ) -> Project: ...
+
+    def advance_context_revision(
+        self,
+        project_id: str,
+        expected_revision: int,
+        *,
+        updated_at: datetime,
+    ) -> Project: ...
+
+    def update_model_version(
+        self,
+        project_id: str,
+        expected_version: str,
+        new_version: str,
+        *,
+        updated_at: datetime,
+    ) -> Project: ...
+
+
+class ContextRepository(Protocol):
+    def add_settings(self, settings: ContextSettings) -> None: ...
+
+    def get_settings(self, project_id: str) -> Optional[ContextSettings]: ...
+
+    def add_section(self, section: ContextSection) -> None: ...
+
+    def get_section(self, section_id: str) -> Optional[ContextSection]: ...
+
+    def sections_for_project(self, project_id: str) -> Sequence[ContextSection]: ...
+
+    def update_section(
+        self, section_id: str, *, name: Optional[str] = None,
+        description: Optional[str] = None, ordinal: Optional[int] = None,
+        expected_status: Optional[ContextLifecycleStatus] = None,
+        new_status: Optional[ContextLifecycleStatus] = None,
+        removed_at: Optional[datetime] = None, updated_at: datetime,
+    ) -> ContextSection: ...
+
+    def add_item(self, item: ContextItem) -> None: ...
+
+    def get_item(self, item_id: str) -> Optional[ContextItem]: ...
+
+    def item_for_workspace_item(self, workspace_item_id: str) -> Optional[ContextItem]: ...
+
+    def items_for_project(self, project_id: str) -> Sequence[ContextItem]: ...
+
+    def update_item(
+        self, item_id: str, *, title_override: Optional[str] = None,
+        purpose: Optional[str] = None,
+        expected_status: Optional[ContextLifecycleStatus] = None,
+        new_status: Optional[ContextLifecycleStatus] = None,
+        removed_at: Optional[datetime] = None, updated_at: datetime,
+    ) -> ContextItem: ...
+
+    def add_placement(self, placement: ContextPlacement) -> None: ...
+
+    def placements_for_item(self, context_item_id: str) -> Sequence[ContextPlacement]: ...
+
+    def placements_for_project(self, project_id: str) -> Sequence[ContextPlacement]: ...
+
+    def get_placement(
+        self, context_item_id: str, context_section_id: str
+    ) -> Optional[ContextPlacement]: ...
+
+    def update_placement(
+        self, placement_id: str, *, ordinal: Optional[int] = None,
+        expected_status: Optional[ContextLifecycleStatus] = None,
+        new_status: Optional[ContextLifecycleStatus] = None,
+        removed_at: Optional[datetime] = None, updated_at: datetime,
+    ) -> ContextPlacement: ...
+
+    def add_content_object(self, value: ContextContentObject) -> None: ...
+
+    def get_content_object(self, object_id: str) -> Optional[ContextContentObject]: ...
+
+    def content_object_by_sha256(
+        self, project_id: str, sha256: str
+    ) -> Optional[ContextContentObject]: ...
+
+    def content_objects_for_project(
+        self, project_id: str
+    ) -> Sequence[ContextContentObject]: ...
+
+    def update_content_object_status(
+        self,
+        object_id: str,
+        expected_status: ContextContentObjectStatus,
+        new_status: ContextContentObjectStatus,
+        *,
+        updated_at: datetime,
+    ) -> ContextContentObject: ...
+
+    def add_revision(self, revision: ContextRevision) -> None: ...
+
+    def get_revision(self, revision_id: str) -> Optional[ContextRevision]: ...
+
+    def revisions_for_item(self, context_item_id: str) -> Sequence[ContextRevision]: ...
+
+    def revisions_for_project(self, project_id: str) -> Sequence[ContextRevision]: ...
+
+    def update_revision_capture(
+        self,
+        revision_id: str,
+        expected_status: ContextRevisionCaptureStatus,
+        new_status: ContextRevisionCaptureStatus,
+        *,
+        updated_at: datetime,
+        content_object_id: Optional[str] = None,
+        source_observed_sha256: Optional[str] = None,
+        ready_at: Optional[datetime] = None,
+        error_code: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> ContextRevision: ...
+
+    def set_item_current_revision(
+        self,
+        item_id: str,
+        expected_revision_id: Optional[str],
+        revision_id: str,
+        *,
+        updated_at: datetime,
+    ) -> ContextItem: ...
+
+    def update_revision_protection(
+        self, revision_id: str, expected_protected: bool, new_protected: bool,
+        *, protection_reason: Optional[str], updated_at: datetime,
+    ) -> ContextRevision: ...
+
+    def delete_revisions(self, revision_ids: Sequence[str]) -> None: ...
+
+    def delete_content_objects(self, object_ids: Sequence[str]) -> None: ...
+
+    def add_annotation(self, annotation: ContextAnnotation) -> None: ...
+
+    def annotations_for_item(self, context_item_id: str) -> Sequence[ContextAnnotation]: ...
+
+    def update_annotation(
+        self, annotation_id: str, *, body: str, author: str,
+        context_revision_id: Optional[str], updated_at: datetime,
+    ) -> ContextAnnotation: ...
+
+
+class ContextPackRepository(Protocol):
+    def add_export(self, value: ContextPackExport) -> None: ...
+
+    def get_export(self, export_id: str) -> Optional[ContextPackExport]: ...
+
+    def exports_for_project(self, project_id: str) -> Sequence[ContextPackExport]: ...
+
+    def update_export_status(
+        self, export_id: str, expected: ContextPackExportStatus,
+        new: ContextPackExportStatus, *, updated_at: datetime,
+        started_at: Optional[datetime] = None,
+        finished_at: Optional[datetime] = None,
+        published_sha256: Optional[str] = None,
+        error_code: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> ContextPackExport: ...
+
+    def add_entry(self, value: ContextPackEntry) -> None: ...
+
+    def entries_for_export(self, export_id: str) -> Sequence[ContextPackEntry]: ...
+
+    def add_section(self, value: ContextPackSection) -> None: ...
+
+    def sections_for_export(self, export_id: str) -> Sequence[ContextPackSection]: ...
+
+    def add_placement(self, value: ContextPackPlacement) -> None: ...
+
+    def placements_for_export(self, export_id: str) -> Sequence[ContextPackPlacement]: ...
+
+    def successful_revision_ids(self, project_id: str) -> frozenset[str]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,6 +766,8 @@ class UnitOfWork(Protocol):
     catalog: CatalogRepository
     processing: ProcessingRepository
     recovery: RecoveryRepository
+    context: ContextRepository
+    context_packs: ContextPackRepository
 
     def __enter__(self) -> "UnitOfWork": ...
 

@@ -9,6 +9,34 @@ from uuid import uuid4
 from pig.application.contracts import (
     AddWorkspaceInputsRequest,
     AddWorkspaceInputsResult,
+    CaptureContextRevisionRequest,
+    CaptureContextRevisionResult,
+    AdvanceContextRevisionRequest,
+    ContextAnnotationMutationResult,
+    ContextItemLifecycleRequest,
+    ContextItemMutationResult,
+    ContextPlacementMutationResult,
+    ContextRevisionProtectionResult,
+    ContextSectionLifecycleRequest,
+    ContextSectionMutationResult,
+    CreateContextSectionRequest,
+    ExecuteContextRevisionCleanupRequest,
+    ExecuteContextRevisionCleanupResult,
+    GetContextItemDetailsRequest,
+    GetContextItemDetailsResult,
+    GetProjectContextRequest,
+    GetProjectContextResult,
+    GetContextPackPlanRequest,
+    GetContextPackPlanResult,
+    PreflightContextPackExportRequest,
+    PreflightContextPackExportResult,
+    ExecuteContextPackExportRequest,
+    ExecuteContextPackExportResult,
+    GetContextPackExportsRequest,
+    GetContextPackExportsResult,
+    CancelContextPackPreflightRequest,
+    RecoverInterruptedContextPackExportsRequest,
+    RecoverInterruptedContextPackExportsResult,
     CreateProjectRequest,
     CreateProjectResult,
     CreateWorkspaceFolderRequest,
@@ -31,7 +59,23 @@ from pig.application.contracts import (
     InspectImportSessionResult,
     InspectProjectRecoveryRequest,
     InspectProjectRecoveryResult,
+    InspectContextObjectStoreRequest,
+    InspectContextObjectStoreResult,
+    PlaceContextItemRequest,
+    PreviewContextRevisionCleanupRequest,
+    PreviewContextRevisionCleanupResult,
+    PreflightContextPromotionRequest,
+    PreflightContextPromotionResult,
+    PromoteWorkspaceItemToContextRequest,
+    PromoteWorkspaceItemToContextResult,
+    SetContextRevisionProtectionRequest,
+    UpdateContextSectionRequest,
+    UpsertContextAnnotationRequest,
     LoadProjectRequest,
+    PreflightProjectContextUpgradeRequest,
+    PreflightProjectContextUpgradeResult,
+    UpgradeProjectContextRequest,
+    UpgradeProjectContextResult,
     MaterializeWorkspaceItemRequest,
     MaterializeWorkspaceItemResult,
     MoveWorkspaceItemRequest,
@@ -88,7 +132,7 @@ from pig.application.ports import (
     WorkspaceManager,
 )
 from pig.domain.catalog_policy import CatalogPolicy
-from pig.domain.entities import ProcessingEvent, Project
+from pig.domain.entities import ContextSettings, ProcessingEvent, Project
 from pig.domain.enums import (
     ErrorCode,
     EventSeverity,
@@ -99,7 +143,11 @@ from pig.domain.enums import (
     ProjectStatus,
 )
 from pig.domain.exceptions import EntityNotFoundError
-from pig.domain.model_version import WORKBENCH_MODEL_VERSION
+from pig.domain.model_version import CURRENT_PROJECT_MODEL_VERSION
+from pig.application.project_upgrade_service import (
+    DEFAULT_CONTEXT_MINIMUM_FREE_BYTES,
+    DEFAULT_CONTEXT_SOFT_QUOTA_BYTES,
+)
 
 
 Clock = Callable[[], datetime]
@@ -159,6 +207,12 @@ class PigApplication:
         workspace_export_service: Optional["WorkspaceExportService"] = None,
         import_undo_service: Optional["ImportUndoService"] = None,
         workbench_recovery_service: Optional["WorkbenchRecoveryService"] = None,
+        project_upgrade_service: Optional["ProjectContextUpgradeService"] = None,
+        context_capture_service: Optional["ContextCaptureService"] = None,
+        context_action_service: Optional["ContextActionService"] = None,
+        context_query_service: Optional["ContextQueryService"] = None,
+        context_pack_plan_service: Optional["ContextPackPlanService"] = None,
+        context_pack_export_service: Optional["ContextPackExportService"] = None,
         clock: Clock = _utc_now,
         id_generator: IdGenerator = _new_id,
     ) -> None:
@@ -179,6 +233,173 @@ class PigApplication:
         self._workspace_export_service = workspace_export_service
         self._import_undo_service = import_undo_service
         self._workbench_recovery_service = workbench_recovery_service
+        self._project_upgrade_service = project_upgrade_service
+        self._context_capture_service = context_capture_service
+        self._context_action_service = context_action_service
+        self._context_query_service = context_query_service
+        self._context_pack_plan_service = context_pack_plan_service
+        self._context_pack_export_service = context_pack_export_service
+
+    def capture_context_revision(
+        self,
+        request: CaptureContextRevisionRequest,
+        *,
+        control: OperationControl | None = None,
+    ) -> CaptureContextRevisionResult:
+        self._assert_writable(request.project_id, request.database_path)
+        if self._context_capture_service is None:
+            raise ApplicationError(
+                "CONTEXT_CAPTURE_NOT_CONFIGURED", "Context capture is not configured"
+            )
+        return self._context_capture_service.capture(request, control=control)
+
+    def inspect_context_object_store(
+        self, request: InspectContextObjectStoreRequest
+    ) -> InspectContextObjectStoreResult:
+        if self._context_capture_service is None:
+            raise ApplicationError(
+                "CONTEXT_CAPTURE_NOT_CONFIGURED", "Context capture is not configured"
+            )
+        return self._context_capture_service.inspect_store(request)
+
+    def promote_workspace_item_to_context(
+        self, request: PromoteWorkspaceItemToContextRequest,
+        *, control: OperationControl | None = None,
+    ) -> PromoteWorkspaceItemToContextResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().promote(request, control=control)
+
+    def preflight_context_promotion(
+        self, request: PreflightContextPromotionRequest
+    ) -> PreflightContextPromotionResult:
+        return self._context_actions().preflight_promotion(request)
+
+    def advance_context_revision(
+        self, request: AdvanceContextRevisionRequest,
+        *, control: OperationControl | None = None,
+    ) -> CaptureContextRevisionResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().advance_revision(request, control=control)
+
+    def remove_context_item(self, request: ContextItemLifecycleRequest) -> ContextItemMutationResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().remove_item(request)
+
+    def restore_context_item(self, request: ContextItemLifecycleRequest) -> ContextItemMutationResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().restore_item(request)
+
+    def create_context_section(self, request: CreateContextSectionRequest) -> ContextSectionMutationResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().create_section(request)
+
+    def update_context_section(self, request: UpdateContextSectionRequest) -> ContextSectionMutationResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().update_section(request)
+
+    def remove_context_section(self, request: ContextSectionLifecycleRequest) -> ContextSectionMutationResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().remove_section(request)
+
+    def restore_context_section(self, request: ContextSectionLifecycleRequest) -> ContextSectionMutationResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().restore_section(request)
+
+    def place_context_item(self, request: PlaceContextItemRequest) -> ContextPlacementMutationResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().place_item(request)
+
+    def remove_context_placement(self, request: PlaceContextItemRequest) -> ContextPlacementMutationResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().remove_placement(request)
+
+    def reorder_context_placement(self, request: PlaceContextItemRequest) -> ContextPlacementMutationResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().reorder_placement(request)
+
+    def upsert_context_annotation(
+        self, request: UpsertContextAnnotationRequest
+    ) -> ContextAnnotationMutationResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().upsert_annotation(request)
+
+    def set_context_revision_protection(
+        self, request: SetContextRevisionProtectionRequest
+    ) -> ContextRevisionProtectionResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().set_revision_protection(request)
+
+    def preview_context_revision_cleanup(
+        self, request: PreviewContextRevisionCleanupRequest
+    ) -> PreviewContextRevisionCleanupResult:
+        return self._context_actions().preview_cleanup(request)
+
+    def execute_context_revision_cleanup(
+        self, request: ExecuteContextRevisionCleanupRequest
+    ) -> ExecuteContextRevisionCleanupResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._context_actions().execute_cleanup(request)
+
+    def get_project_context(self, request: GetProjectContextRequest) -> GetProjectContextResult:
+        return self._context_queries().project_context(request)
+
+    def get_context_pack_plan(
+        self, request: GetContextPackPlanRequest
+    ) -> GetContextPackPlanResult:
+        if self._context_pack_plan_service is None:
+            raise ApplicationError("CONTEXT_PACK_PLAN_NOT_CONFIGURED", "Context Pack planning is not configured")
+        return self._context_pack_plan_service.get_plan(request)
+
+    def preflight_context_pack_export(
+        self, request: PreflightContextPackExportRequest,
+        *, control: OperationControl | None = None,
+    ) -> PreflightContextPackExportResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._pack_exports().preflight(request, control=control)
+
+    def execute_context_pack_export(
+        self, request: ExecuteContextPackExportRequest,
+        *, control: OperationControl | None = None,
+    ) -> ExecuteContextPackExportResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._pack_exports().execute(request, control=control)
+
+    def get_context_pack_exports(
+        self, request: GetContextPackExportsRequest
+    ) -> GetContextPackExportsResult:
+        return self._pack_exports().history(request)
+
+    def cancel_context_pack_preflight(
+        self, request: CancelContextPackPreflightRequest
+    ):
+        self._assert_writable(request.project_id, request.database_path)
+        return self._pack_exports().cancel_preflight(request)
+
+    def recover_interrupted_context_pack_exports(
+        self, request: RecoverInterruptedContextPackExportsRequest
+    ) -> RecoverInterruptedContextPackExportsResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._pack_exports().recover_interrupted(request)
+
+    def _pack_exports(self) -> "ContextPackExportService":
+        if self._context_pack_export_service is None:
+            raise ApplicationError("CONTEXT_PACK_EXPORT_NOT_CONFIGURED", "Context Pack export is not configured")
+        return self._context_pack_export_service
+
+    def get_context_item_details(
+        self, request: GetContextItemDetailsRequest
+    ) -> GetContextItemDetailsResult:
+        return self._context_queries().item_details(request)
+
+    def _context_actions(self) -> "ContextActionService":
+        if self._context_action_service is None:
+            raise ApplicationError("CONTEXT_ACTIONS_NOT_CONFIGURED", "Context actions are not configured")
+        return self._context_action_service
+
+    def _context_queries(self) -> "ContextQueryService":
+        if self._context_query_service is None:
+            raise ApplicationError("CONTEXT_QUERIES_NOT_CONFIGURED", "Context queries are not configured")
+        return self._context_query_service
 
     def import_project_items(
         self,
@@ -464,7 +685,7 @@ class PigApplication:
                 description=description,
                 status=ProjectStatus.CREATED,
                 workspace_locator=reservation.final_path.resolve(strict=False).as_uri(),
-                model_version=WORKBENCH_MODEL_VERSION,
+                model_version=CURRENT_PROJECT_MODEL_VERSION,
                 created_at=occurred_at,
                 updated_at=occurred_at,
             )
@@ -479,13 +700,22 @@ class PigApplication:
                 correlation_id=correlation_id,
                 details={
                     "name": name,
-                    "model_version": WORKBENCH_MODEL_VERSION,
+                    "model_version": CURRENT_PROJECT_MODEL_VERSION,
                 },
             )
             with self._database.unit_of_work(
                 reservation.temporary_database_path
             ) as uow:
                 uow.projects.add(project)
+                uow.context.add_settings(
+                    ContextSettings(
+                        project_id=project_id,
+                        soft_quota_bytes=DEFAULT_CONTEXT_SOFT_QUOTA_BYTES,
+                        minimum_free_bytes=DEFAULT_CONTEXT_MINIMUM_FREE_BYTES,
+                        created_at=occurred_at,
+                        updated_at=occurred_at,
+                    )
+                )
                 uow.processing.append_event(event)
                 uow.commit()
             self._workspace.publish(reservation)
@@ -580,7 +810,8 @@ class PigApplication:
         """Load the single Project owned by a Project SQLite database."""
 
         database_path = self._absolute_path(request.database_path, "database_path")
-        self._database.migrate(database_path)
+        if self._project_upgrade_service is not None:
+            self._project_upgrade_service.require_ready(database_path)
         with self._database.unit_of_work(database_path) as uow:
             project = uow.projects.get_singleton()
         if project is None:
@@ -593,6 +824,26 @@ class PigApplication:
                 database_path=database_path,
             )
         )
+
+    def preflight_project_context_upgrade(
+        self, request: PreflightProjectContextUpgradeRequest
+    ) -> PreflightProjectContextUpgradeResult:
+        if self._project_upgrade_service is None:
+            raise ApplicationError(
+                "PROJECT_UPGRADE_NOT_CONFIGURED",
+                "Project Context upgrade is not configured",
+            )
+        return self._project_upgrade_service.preflight(request)
+
+    def upgrade_project_context(
+        self, request: UpgradeProjectContextRequest
+    ) -> UpgradeProjectContextResult:
+        if self._project_upgrade_service is None:
+            raise ApplicationError(
+                "PROJECT_UPGRADE_NOT_CONFIGURED",
+                "Project Context upgrade is not configured",
+            )
+        return self._project_upgrade_service.upgrade(request)
 
     def get_node(self, request: GetNodeRequest) -> NodeDetails:
         database_path = self._absolute_path(request.database_path, "database_path")
@@ -942,14 +1193,14 @@ class PigApplication:
 
     @staticmethod
     def _require_supported_model(project: Project) -> None:
-        if project.model_version != WORKBENCH_MODEL_VERSION:
+        if project.model_version != CURRENT_PROJECT_MODEL_VERSION:
             raise ApplicationError(
                 code="UNSUPPORTED_PROJECT_MODEL_VERSION",
                 message="project was created with an unsupported data model",
                 details={
                     "project_id": project.id,
                     "actual_model_version": project.model_version,
-                    "supported_model_version": WORKBENCH_MODEL_VERSION,
+                    "supported_model_version": CURRENT_PROJECT_MODEL_VERSION,
                 },
             )
 
@@ -1088,6 +1339,45 @@ class WorkbenchStructureService(Protocol):
     ) -> MaterializeWorkspaceItemResult: ...
 
     def restore_content(self, **kwargs): ...
+
+    def produce_source_content(self, **kwargs): ...
+
+
+class ContextCaptureService(Protocol):
+    def capture(
+        self,
+        request: CaptureContextRevisionRequest,
+        *,
+        control: OperationControl | None = None,
+    ) -> CaptureContextRevisionResult: ...
+
+    def inspect_store(
+        self, request: InspectContextObjectStoreRequest
+    ) -> InspectContextObjectStoreResult: ...
+
+
+class ContextActionService(Protocol):
+    def preflight_promotion(self, request): ...
+    def promote(self, request, *, control=None): ...
+    def advance_revision(self, request, *, control=None): ...
+    def remove_item(self, request): ...
+    def restore_item(self, request): ...
+    def create_section(self, request): ...
+    def update_section(self, request): ...
+    def remove_section(self, request): ...
+    def restore_section(self, request): ...
+    def place_item(self, request): ...
+    def remove_placement(self, request): ...
+    def reorder_placement(self, request): ...
+    def upsert_annotation(self, request): ...
+    def set_revision_protection(self, request): ...
+    def preview_cleanup(self, request): ...
+    def execute_cleanup(self, request): ...
+
+
+class ContextQueryService(Protocol):
+    def project_context(self, request): ...
+    def item_details(self, request): ...
 
 
 class WorkingFileService(Protocol):

@@ -43,6 +43,7 @@ class ProjectModel(Base):
         CheckConstraint("singleton_key = 1", name="singleton_key_is_one"),
         CheckConstraint("length(trim(name)) > 0", name="name_not_blank"),
         CheckConstraint("workspace_revision >= 0", name="workspace_revision_nonnegative"),
+        CheckConstraint("context_revision >= 0", name="context_revision_nonnegative"),
         UniqueConstraint("singleton_key", name="uq_projects_singleton"),
     )
 
@@ -60,6 +61,457 @@ class ProjectModel(Base):
     workspace_revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    context_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
+
+class ContextSettingsModel(Base):
+    __tablename__ = "context_settings"
+    __table_args__ = (
+        CheckConstraint("soft_quota_bytes > 0", name="soft_quota_bytes_positive"),
+        CheckConstraint("minimum_free_bytes > 0", name="minimum_free_bytes_positive"),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+    )
+
+    project_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    soft_quota_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    minimum_free_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ContextSectionModel(Base):
+    __tablename__ = "context_sections"
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_context_sections_id_project"),
+        CheckConstraint("length(trim(name)) > 0", name="name_not_blank"),
+        CheckConstraint("ordinal >= 0", name="ordinal_nonnegative"),
+        CheckConstraint(
+            "(lifecycle_status = 'ACTIVE' AND removed_at IS NULL) OR "
+            "(lifecycle_status = 'REMOVED' AND removed_at IS NOT NULL)",
+            name="removed_at_matches_lifecycle",
+        ),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+        Index(
+            "ix_context_sections_project_order",
+            "project_id",
+            "lifecycle_status",
+            "ordinal",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    lifecycle_status: Mapped[enums.ContextLifecycleStatus] = mapped_column(
+        enum_type(enums.ContextLifecycleStatus, "context_section_lifecycle_status"),
+        nullable=False,
+    )
+    removed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ContextItemModel(Base):
+    __tablename__ = "context_items"
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_context_items_id_project"),
+        UniqueConstraint(
+            "project_id", "workspace_item_id",
+            name="uq_context_items_workspace_item",
+        ),
+        CheckConstraint(
+            "title_override IS NULL OR length(trim(title_override)) > 0",
+            name="title_override_not_blank",
+        ),
+        CheckConstraint(
+            "(lifecycle_status = 'ACTIVE' AND removed_at IS NULL) OR "
+            "(lifecycle_status = 'REMOVED' AND removed_at IS NOT NULL)",
+            name="removed_at_matches_lifecycle",
+        ),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["workspace_item_id", "project_id"],
+            ["workspace_items.id", "workspace_items.project_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["current_context_revision_id", "project_id", "id"],
+            [
+                "context_revisions.id",
+                "context_revisions.project_id",
+                "context_revisions.context_item_id",
+            ],
+            name="fk_context_items_current_revision",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
+        Index("ix_context_items_project_lifecycle", "project_id", "lifecycle_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    workspace_item_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    title_override: Mapped[Optional[str]] = mapped_column(String(512))
+    purpose: Mapped[Optional[str]] = mapped_column(Text)
+    lifecycle_status: Mapped[enums.ContextLifecycleStatus] = mapped_column(
+        enum_type(enums.ContextLifecycleStatus, "context_item_lifecycle_status"),
+        nullable=False,
+    )
+    current_context_revision_id: Mapped[Optional[str]] = mapped_column(String(36))
+    removed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ContextPlacementModel(Base):
+    __tablename__ = "context_placements"
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_context_placements_id_project"),
+        UniqueConstraint(
+            "context_item_id", "context_section_id",
+            name="uq_context_placements_item_section",
+        ),
+        CheckConstraint("ordinal >= 0", name="ordinal_nonnegative"),
+        CheckConstraint(
+            "(lifecycle_status = 'ACTIVE' AND removed_at IS NULL) OR "
+            "(lifecycle_status = 'REMOVED' AND removed_at IS NOT NULL)",
+            name="removed_at_matches_lifecycle",
+        ),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["context_item_id", "project_id"],
+            ["context_items.id", "context_items.project_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["context_section_id", "project_id"],
+            ["context_sections.id", "context_sections.project_id"],
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_context_placements_section_order",
+            "project_id",
+            "context_section_id",
+            "lifecycle_status",
+            "ordinal",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    context_item_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    context_section_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    lifecycle_status: Mapped[enums.ContextLifecycleStatus] = mapped_column(
+        enum_type(enums.ContextLifecycleStatus, "context_placement_lifecycle_status"),
+        nullable=False,
+    )
+    removed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ContextContentObjectModel(Base):
+    __tablename__ = "context_content_objects"
+    __table_args__ = (
+        UniqueConstraint(
+            "id", "project_id", name="uq_context_content_objects_id_project"
+        ),
+        UniqueConstraint(
+            "project_id", "sha256", name="uq_context_content_objects_project_sha256"
+        ),
+        UniqueConstraint(
+            "project_id", "object_key", name="uq_context_content_objects_object_key"
+        ),
+        CheckConstraint("size_bytes >= 0", name="size_bytes_nonnegative"),
+        CheckConstraint(
+            "length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="sha256_canonical",
+        ),
+        CheckConstraint("length(trim(object_key)) > 0", name="object_key_not_blank"),
+        CheckConstraint(
+            "substr(object_key, 1, 1) <> '/' "
+            "AND instr(object_key, '\\') = 0 "
+            "AND instr('/' || object_key || '/', '/../') = 0",
+            name="object_key_project_relative",
+        ),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+        Index(
+            "ix_context_content_objects_project_status",
+            "project_id",
+            "availability_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    availability_status: Mapped[enums.ContextContentObjectStatus] = mapped_column(
+        enum_type(enums.ContextContentObjectStatus, "context_content_object_status"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ContextRevisionModel(Base):
+    __tablename__ = "context_revisions"
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_context_revisions_id_project"),
+        UniqueConstraint(
+            "id", "project_id", "context_item_id",
+            name="uq_context_revisions_item_identity",
+        ),
+        CheckConstraint(
+            "captured_workspace_revision >= 0",
+            name="captured_workspace_revision_nonnegative",
+        ),
+        CheckConstraint(
+            "source_observed_sha256 IS NULL OR "
+            "(length(source_observed_sha256) = 64 "
+            "AND source_observed_sha256 NOT GLOB '*[^0-9a-f]*')",
+            name="source_observed_sha256_canonical",
+        ),
+        CheckConstraint(
+            "(source_kind = 'WORKING' AND source_working_artifact_id IS NOT NULL "
+            "AND source_node_id IS NULL) OR "
+            "(source_kind = 'SOURCE' AND source_node_id IS NOT NULL "
+            "AND source_working_artifact_id IS NULL)",
+            name="source_kind_matches_reference",
+        ),
+        CheckConstraint(
+            "capture_status <> 'READY' OR "
+            "(content_object_id IS NOT NULL AND source_observed_sha256 IS NOT NULL "
+            "AND ready_at IS NOT NULL)",
+            name="ready_revision_is_complete",
+        ),
+        CheckConstraint(
+            "(capture_status = 'FAILED' AND error_code IS NOT NULL "
+            "AND error_message IS NOT NULL) OR capture_status <> 'FAILED'",
+            name="failed_revision_has_error",
+        ),
+        CheckConstraint(
+            "(is_manually_protected = 0 AND protection_reason IS NULL) OR "
+            "(is_manually_protected = 1 AND protection_reason IS NOT NULL "
+            "AND length(trim(protection_reason)) > 0)",
+            name="manual_protection_has_reason",
+        ),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["context_item_id", "project_id"],
+            ["context_items.id", "context_items.project_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["content_object_id", "project_id"],
+            ["context_content_objects.id", "context_content_objects.project_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_working_artifact_id", "project_id"],
+            ["working_artifacts.id", "working_artifacts.project_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_node_id", "project_id"],
+            ["nodes.id", "nodes.project_id"],
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_context_revisions_item_created",
+            "project_id",
+            "context_item_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    context_item_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    content_object_id: Mapped[Optional[str]] = mapped_column(String(36))
+    source_kind: Mapped[enums.ContextRevisionSourceKind] = mapped_column(
+        enum_type(enums.ContextRevisionSourceKind, "context_revision_source_kind"),
+        nullable=False,
+    )
+    source_working_artifact_id: Mapped[Optional[str]] = mapped_column(String(36))
+    source_node_id: Mapped[Optional[str]] = mapped_column(String(36))
+    captured_workspace_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_observed_sha256: Mapped[Optional[str]] = mapped_column(String(64))
+    capture_status: Mapped[enums.ContextRevisionCaptureStatus] = mapped_column(
+        enum_type(enums.ContextRevisionCaptureStatus, "context_revision_capture_status"),
+        nullable=False,
+    )
+    is_manually_protected: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    protection_reason: Mapped[Optional[str]] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    ready_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime())
+    error_code: Mapped[Optional[str]] = mapped_column(String(64))
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ContextAnnotationModel(Base):
+    __tablename__ = "context_annotations"
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_context_annotations_id_project"),
+        CheckConstraint("length(trim(body)) > 0", name="body_not_blank"),
+        CheckConstraint("length(trim(author)) > 0", name="author_not_blank"),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["context_item_id", "project_id"],
+            ["context_items.id", "context_items.project_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["context_revision_id", "project_id", "context_item_id"],
+            [
+                "context_revisions.id",
+                "context_revisions.project_id",
+                "context_revisions.context_item_id",
+            ],
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_context_annotations_item_created",
+            "project_id",
+            "context_item_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    context_item_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    context_revision_id: Mapped[Optional[str]] = mapped_column(String(36))
+    kind: Mapped[enums.ContextAnnotationKind] = mapped_column(
+        enum_type(enums.ContextAnnotationKind, "context_annotation_kind"),
+        nullable=False,
+    )
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ContextPackExportModel(Base):
+    __tablename__ = "context_pack_exports"
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_context_pack_exports_identity"),
+        CheckConstraint("captured_context_revision >= 0", name="context_revision_nonnegative"),
+        CheckConstraint("entry_count >= 0 AND total_bytes >= 0", name="counts_nonnegative"),
+        CheckConstraint("length(trim(destination_locator)) > 0", name="destination_not_blank"),
+        CheckConstraint("length(plan_fingerprint) = 64 AND plan_fingerprint NOT GLOB '*[^0-9a-f]*'", name="fingerprint_canonical"),
+        CheckConstraint("published_sha256 IS NULL OR (length(published_sha256) = 64 AND published_sha256 NOT GLOB '*[^0-9a-f]*')", name="published_sha256_canonical"),
+        CheckConstraint("status <> 'SUCCEEDED' OR (finished_at IS NOT NULL AND published_sha256 IS NOT NULL)", name="success_has_publication"),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+        Index("ix_context_pack_exports_project_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    format: Mapped[enums.ContextPackFormat] = mapped_column(
+        enum_type(enums.ContextPackFormat, "context_pack_format"), nullable=False
+    )
+    status: Mapped[enums.ContextPackExportStatus] = mapped_column(
+        enum_type(enums.ContextPackExportStatus, "context_pack_export_status"), nullable=False
+    )
+    destination_locator: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    captured_context_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    manifest_schema_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    plan_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    entry_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    started_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime())
+    finished_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime())
+    published_sha256: Mapped[Optional[str]] = mapped_column(String(64))
+    error_code: Mapped[Optional[str]] = mapped_column(String(64))
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+
+class ContextPackEntryModel(Base):
+    __tablename__ = "context_pack_entries"
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", "export_id", name="uq_context_pack_entries_identity"),
+        UniqueConstraint("export_id", "context_item_id", name="uq_context_pack_entries_item"),
+        UniqueConstraint("export_id", "ordinal", name="uq_context_pack_entries_ordinal"),
+        UniqueConstraint("export_id", "relative_path", name="uq_context_pack_entries_path"),
+        CheckConstraint("ordinal >= 0 AND size_bytes >= 0", name="size_and_ordinal_nonnegative"),
+        CheckConstraint("length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'", name="sha256_canonical"),
+        CheckConstraint("substr(relative_path, 1, 6) = 'files/' AND instr(relative_path, '\\') = 0 AND instr('/' || relative_path || '/', '/../') = 0", name="relative_path_safe"),
+        ForeignKeyConstraint(["export_id", "project_id"], ["context_pack_exports.id", "context_pack_exports.project_id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["context_revision_id", "project_id", "context_item_id"], ["context_revisions.id", "context_revisions.project_id", "context_revisions.context_item_id"], ondelete="RESTRICT"),
+        Index("ix_context_pack_entries_revision", "project_id", "context_revision_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    export_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    context_item_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    context_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(512), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    purpose_snapshot: Mapped[Optional[str]] = mapped_column(Text)
+    guidance_body_snapshot: Mapped[Optional[str]] = mapped_column(Text)
+    guidance_author_snapshot: Mapped[Optional[str]] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ContextPackSectionModel(Base):
+    __tablename__ = "context_pack_sections"
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", "export_id", name="uq_context_pack_sections_identity"),
+        UniqueConstraint("export_id", "source_section_id", name="uq_context_pack_sections_source"),
+        UniqueConstraint("export_id", "ordinal", name="uq_context_pack_sections_ordinal"),
+        CheckConstraint("ordinal >= 0 AND length(trim(name_snapshot)) > 0", name="section_valid"),
+        CheckConstraint("(is_unsectioned = 1 AND source_section_id IS NULL) OR (is_unsectioned = 0 AND source_section_id IS NOT NULL)", name="unsectioned_matches_source"),
+        ForeignKeyConstraint(["export_id", "project_id"], ["context_pack_exports.id", "context_pack_exports.project_id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["source_section_id", "project_id"], ["context_sections.id", "context_sections.project_id"], ondelete="RESTRICT"),
+        Index("uq_context_pack_sections_one_unsectioned", "export_id", unique=True, sqlite_where=text("is_unsectioned = 1")),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    export_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    source_section_id: Mapped[Optional[str]] = mapped_column(String(36))
+    name_snapshot: Mapped[str] = mapped_column(String(255), nullable=False)
+    description_snapshot: Mapped[Optional[str]] = mapped_column(Text)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_unsectioned: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ContextPackPlacementModel(Base):
+    __tablename__ = "context_pack_placements"
+    __table_args__ = (
+        UniqueConstraint("export_id", "entry_id", "section_id", name="uq_context_pack_placements_entry_section"),
+        CheckConstraint("ordinal >= 0", name="ordinal_nonnegative"),
+        ForeignKeyConstraint(["entry_id", "project_id", "export_id"], ["context_pack_entries.id", "context_pack_entries.project_id", "context_pack_entries.export_id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["section_id", "project_id", "export_id"], ["context_pack_sections.id", "context_pack_sections.project_id", "context_pack_sections.export_id"], ondelete="RESTRICT"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    export_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    entry_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    section_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
 class ImportSessionModel(Base):
@@ -1156,6 +1608,21 @@ class ProcessingEventModel(Base):
             ["working_artifacts.id", "working_artifacts.project_id"],
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["context_section_id", "project_id"],
+            ["context_sections.id", "context_sections.project_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["context_item_id", "project_id"],
+            ["context_items.id", "context_items.project_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["context_annotation_id", "project_id"],
+            ["context_annotations.id", "context_annotations.project_id"],
+            ondelete="RESTRICT",
+        ),
         Index("ix_processing_events_project_time", "project_id", "occurred_at"),
         Index("ix_processing_events_node_time", "node_id", "occurred_at"),
         Index("ix_processing_events_job_time", "job_id", "occurred_at"),
@@ -1167,6 +1634,11 @@ class ProcessingEventModel(Base):
         Index(
             "ix_processing_events_workspace_item_time",
             "workspace_item_id",
+            "occurred_at",
+        ),
+        Index(
+            "ix_processing_events_context_item_time",
+            "context_item_id",
             "occurred_at",
         ),
     )
@@ -1184,6 +1656,11 @@ class ProcessingEventModel(Base):
     snapshot_id: Mapped[Optional[str]] = mapped_column(String(36))
     workspace_item_id: Mapped[Optional[str]] = mapped_column(String(36))
     working_artifact_id: Mapped[Optional[str]] = mapped_column(String(36))
+    context_section_id: Mapped[Optional[str]] = mapped_column(String(36))
+    context_item_id: Mapped[Optional[str]] = mapped_column(String(36))
+    context_content_object_id: Mapped[Optional[str]] = mapped_column(String(36))
+    context_revision_id: Mapped[Optional[str]] = mapped_column(String(36))
+    context_annotation_id: Mapped[Optional[str]] = mapped_column(String(36))
     actor: Mapped[str] = mapped_column(String(255), nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     severity: Mapped[enums.EventSeverity] = mapped_column(
