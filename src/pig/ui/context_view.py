@@ -4,7 +4,7 @@ import html
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QAbstractListModel, QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import QAbstractListModel, QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
-    QFrame,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -20,6 +19,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListView,
     QListWidget,
+    QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -57,6 +59,18 @@ from pig.application.contracts import (
     UpsertContextAnnotationRequest,
 )
 from pig.domain.enums import ContextPackExportStatus, ContextPackFormat, ContextRevisionCaptureStatus
+from pig.application.content_contracts import (
+    ExtractContextRevisionsRequest, SearchContextContentRequest,
+    RebuildContextIndexRequest, OpenContextRevisionRequest,
+    RecoverInterruptedContentRequest,
+)
+from pig.application.experience_service import (
+    ExperienceEvidenceChoice, ExperienceMutationRequest, ExperienceTransitionRequest,
+)
+from pig.domain.experience_policy import ExperienceKind, ExperienceStatus
+from pig.application.ai_analysis_service import AnalysisPlanRequest
+from pig.application.ai_prompts import instruction_for
+from pig.domain.ai_policy import AnalysisAction
 CONTEXT_ID_ROLE = int(Qt.ItemDataRole.UserRole)
 CONTEXT_KIND_ROLE = CONTEXT_ID_ROLE + 1
 
@@ -110,7 +124,7 @@ class ContextSectionModel(QAbstractListModel):
 
 
 class ContextItemModel(QAbstractTableModel):
-    HEADERS = ("核心文件", "用途", "新鲜度", "Revision")
+    HEADERS = ("核心文件", "用途", "状态")
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -144,12 +158,16 @@ class ContextItemModel(QAbstractTableModel):
             return value.item.id
         if role == Qt.ItemDataRole.DisplayRole:
             title = value.item.title_override or value.workspace_item.display_name
-            revision = value.current_revision
+            freshness = {
+                "CURRENT": "已固定版本",
+                "WORKSPACE_UPDATED": "有更新待确认",
+                "WORKSPACE_MISSING": "工作文件缺失",
+                "WORKSPACE_UNREADABLE": "工作文件无法读取",
+            }.get(value.freshness.value, value.freshness.value)
             values = (
                 title,
                 value.item.purpose or "",
-                value.freshness.value,
-                "—" if revision is None else revision.capture_status.value,
+                freshness,
             )
             return values[index.column()]
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -218,7 +236,7 @@ class PromotionDialog(QDialog):
 class ContextPackDialog(QDialog):
     """Select a portable pack format, items, fixed revisions, and destination."""
 
-    def __init__(self, project_name: str, rows, parent=None) -> None:
+    def __init__(self, project_name: str, rows, records=(), parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("导出 Context Pack")
         self.setMinimumWidth(680)
@@ -246,6 +264,20 @@ class ContextPackDialog(QDialog):
                 choices.setCurrentIndex(current)
             self.items.setCellWidget(index, 1, choices)
         layout.addWidget(self.items)
+        self.records = QListWidget()
+        for summary in records:
+            record = summary.record
+            entry = QListWidgetItem(
+                f"{summary.title} · {record.kind.value} · {record.status.value}"
+            )
+            entry.setFlags(entry.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            entry.setCheckState(Qt.CheckState.Unchecked)
+            entry.setData(CONTEXT_ID_ROLE, record.id)
+            self.records.addItem(entry)
+        if records:
+            layout.addWidget(QLabel("附带人工记录（仅当所选版本包含全部依据时可导出）"))
+            self.records.setMaximumHeight(110)
+            layout.addWidget(self.records)
         form = QFormLayout()
         self.format_choice = QComboBox()
         self.format_choice.addItem("普通目录", ContextPackFormat.DIRECTORY)
@@ -295,8 +327,248 @@ class ContextPackDialog(QDialog):
         ) for row in range(self.items.rowCount())
             if self.items.item(row, 0).data(CONTEXT_ID_ROLE) in selected)
 
+    @property
+    def selected_record_ids(self) -> tuple[str, ...]:
+        return tuple(self.records.item(row).data(CONTEXT_ID_ROLE)
+                     for row in range(self.records.count())
+                     if self.records.item(row).checkState() == Qt.CheckState.Checked)
+
+
+class ExperienceDialog(QDialog):
+    """Only captures human-authored text and explicit fixed-Revision choices."""
+
+    def __init__(self, revision_choices, *, initial=None, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("记录项目脉络" if initial is None else "更正人工记录")
+        self.setMinimumWidth(570)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.kind = QComboBox()
+        for kind, label in ((ExperienceKind.JUDGMENT, "判断"),
+                            (ExperienceKind.DECISION, "决定"),
+                            (ExperienceKind.LESSON, "经验")):
+            self.kind.addItem(label, kind)
+        if initial is not None:
+            self.kind.setCurrentIndex(self.kind.findData(initial.record.kind))
+            self.kind.setEnabled(False)
+        self.body = QTextEdit()
+        self.body.setPlainText("" if initial is None else initial.versions[-1].body)
+        self.body.setPlaceholderText("写下判断、决定或经验；首行将作为列表摘要")
+        form.addRow("类型", self.kind)
+        form.addRow("记录内容", self.body)
+        layout.addLayout(form)
+        layout.addWidget(QLabel("关联固定文件版本"))
+        self.evidence = QListWidget()
+        linked = set() if initial is None else {
+            (link.context_item_id, link.context_revision_id)
+            for link in initial.revision_links
+        }
+        for item_id, revision_id, label, preferred in revision_choices:
+            entry = QListWidgetItem(label)
+            entry.setFlags(entry.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            entry.setCheckState(Qt.CheckState.Checked if (
+                (item_id, revision_id) in linked or (initial is None and preferred)
+            ) else Qt.CheckState.Unchecked)
+            entry.setData(CONTEXT_ID_ROLE, (item_id, revision_id))
+            self.evidence.addItem(entry)
+        self.evidence.setMaximumHeight(180)
+        layout.addWidget(self.evidence)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._accept_valid)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _accept_valid(self) -> None:
+        if not self.body.toPlainText().strip() or not self.selected_evidence:
+            QMessageBox.warning(self, "项目脉络", "请填写记录内容，并至少关联一个固定版本。")
+            return
+        self.accept()
+
+    @property
+    def derived_title(self) -> str:
+        first_line = next(
+            (line.strip() for line in self.body.toPlainText().splitlines() if line.strip()),
+            "",
+        )
+        return first_line[:200]
+
+    @property
+    def selected_evidence(self) -> tuple[ExperienceEvidenceChoice, ...]:
+        return tuple(ExperienceEvidenceChoice(*self.evidence.item(row).data(CONTEXT_ID_ROLE))
+                     for row in range(self.evidence.count())
+                     if self.evidence.item(row).checkState() == Qt.CheckState.Checked)
+
+class ExperienceHistoryDialog(QDialog):
+    def __init__(self, detail, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("人工记录与更正历史")
+        self.setMinimumSize(620, 410)
+        layout = QVBoxLayout(self)
+        self.versions = QComboBox()
+        for version in reversed(detail.versions):
+            self.versions.addItem(
+                f"版本 {version.version} · {version.recorded_at.astimezone():%Y-%m-%d %H:%M} "
+                f"· {version.author}", version,
+            )
+        self.body = QTextEdit()
+        self.body.setReadOnly(True)
+        self.links = QLabel(
+            f"当前版本关联 {len(detail.revision_links)} 个固定 Revision，"
+            f"状态：{detail.record.status.value}"
+        )
+        self.links.setWordWrap(True)
+        layout.addWidget(self.versions)
+        layout.addWidget(self.body, 1)
+        layout.addWidget(self.links)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.versions.currentIndexChanged.connect(self._show_version)
+        self._show_version()
+
+    def _show_version(self, _index=None) -> None:
+        version = self.versions.currentData()
+        if version is not None:
+            self.body.setPlainText(version.body)
+
+
+class AIActionDialog(QDialog):
+    def __init__(self, *, profiles, other_revisions, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("AI 辅助分析")
+        self.setMinimumWidth(470)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.action = QComboBox()
+        self.action.addItem("摘要", AnalysisAction.SUMMARY)
+        self.action.addItem("关键事实卡", AnalysisAction.KEY_FACTS)
+        if other_revisions:
+            self.action.addItem("比较两个固定版本", AnalysisAction.COMPARE)
+        self.model = QComboBox()
+        for profile in profiles:
+            self.model.addItem(f"{profile.provider} · {profile.model}",
+                               (profile.provider, profile.model))
+        self.other_revision = QComboBox()
+        for revision_id, title in other_revisions:
+            self.other_revision.addItem(title, revision_id)
+        self.other_revision.setEnabled(False)
+        self.action.currentIndexChanged.connect(lambda: self.other_revision.setEnabled(
+            self.action.currentData() == AnalysisAction.COMPARE))
+        form.addRow("任务", self.action)
+        form.addRow("Provider / 模型", self.model)
+        form.addRow("比较对象", self.other_revision)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("预览输入")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class AIPlanPreviewDialog(QDialog):
+    def __init__(self, plan, *, can_execute: bool, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("逐次外发预览")
+        self.setMinimumSize(720, 540)
+        layout = QVBoxLayout(self)
+        title = QLabel(
+            f"{plan.request.provider} · {plan.request.model} · {plan.request.action.value} · "
+            f"{plan.coverage} · 最多约 ${plan.estimated_max_usd:.4f}（估算）"
+        )
+        title.setWordWrap(True)
+        layout.addWidget(title)
+        if not can_execute:
+            note = QLabel("当前计划不在已批准的合成外发范围内；只能预览，不会发送。")
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        preview = QTextEdit()
+        preview.setReadOnly(True)
+        parts = ["[开发者指令 / Developer instruction]", instruction_for(plan.request.action)]
+        for element in plan.elements:
+            parts.extend((
+                f"\n[Element {element.id} | Revision {element.revision_id} | "
+                f"{element.locator_kind}: {element.locator_value}]",
+                element.text,
+            ))
+        if plan.omitted_elements:
+            parts.append(f"\n[另有 {plan.omitted_elements} 个元素未包含 / omitted]")
+        preview.setPlainText("\n".join(parts))
+        layout.addWidget(preview, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确认本次发送")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(can_execute)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("关闭")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class AIResultDialog(QDialog):
+    def __init__(self, result, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("AI 草稿 · 待人工核对")
+        self.setMinimumSize(660, 470)
+        layout = QVBoxLayout(self)
+        notices = []
+        if result.possibly_stale:
+            notices.append("工作区或固定版本可能已变化，请重新核对。")
+        if result.coverage == "PARTIAL_INPUT":
+            notices.append("仅分析了预览中的部分内容，不代表全文结论。")
+        if notices:
+            note = QLabel("\n".join(notices))
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        body = QTextEdit()
+        body.setReadOnly(True)
+        body.setPlainText("\n\n".join(
+            f"{index}. {claim.text}"
+            + (f"\n对象：{claim.subject}" if claim.subject else "")
+            + (f" · 时间：{claim.time}" if claim.time else "")
+            for index, claim in enumerate(result.claims, 1)
+        ))
+        layout.addWidget(body, 1)
+        layout.addWidget(QLabel("引用依据（双击打开只读固定版本）"))
+        self.citations = QListWidget()
+        input_by_id = {value[0]: value for value in result.inputs}
+        seen = set()
+        for claim in result.claims:
+            for element_id in claim.element_ids:
+                if element_id in seen:
+                    continue
+                seen.add(element_id)
+                _id, revision_id, kind, locator = input_by_id[element_id]
+                entry = QListWidgetItem(
+                    f"{revision_id[:8]} · {kind}: {locator} · 元素 {element_id[:8]}"
+                )
+                entry.setData(CONTEXT_ID_ROLE, revision_id)
+                self.citations.addItem(entry)
+        self.citations.setMaximumHeight(135)
+        layout.addWidget(self.citations)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("打开选中依据")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("关闭")
+        buttons.accepted.connect(self._accept_selected)
+        buttons.rejected.connect(self.reject)
+        self.citations.itemDoubleClicked.connect(lambda *_: self._accept_selected())
+        layout.addWidget(buttons)
+
+    def _accept_selected(self) -> None:
+        if self.citations.currentItem() is not None:
+            self.accept()
+
+    @property
+    def selected_revision_id(self) -> str | None:
+        item = self.citations.currentItem()
+        return None if item is None else item.data(CONTEXT_ID_ROLE)
+
 
 class ProjectContextView(QWidget):
+    workspace_requested = Signal()
+
     """Minimum V2.1.4 UI over typed Context Application contracts only."""
 
     def __init__(
@@ -326,31 +598,49 @@ class ProjectContextView(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 14, 18, 14)
         outer.setSpacing(10)
-        header = QFrame()
-        header.setObjectName("projectHeader")
+        header = QWidget()
         header_layout = QHBoxLayout(header)
-        titles = QVBoxLayout()
-        eyebrow = QLabel("PIG  ·  PROJECT CONTEXT")
-        eyebrow.setObjectName("productEyebrow")
-        title = QLabel("核心文件与确定版本")
-        title.setObjectName("projectTitle")
-        hint = QLabel("从 Workspace 选择真正重要的文件，并记录用途、分组与版本。")
-        hint.setObjectName("projectMeta")
-        titles.addWidget(eyebrow)
-        titles.addWidget(title)
-        titles.addWidget(hint)
-        header_layout.addLayout(titles, 1)
-        self.refresh_button = QPushButton("刷新 Context")
-        self.export_pack_button = QPushButton("导出 Context Pack")
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.addStretch(1)
+        self.add_from_workspace_button = QPushButton("从工作区添加")
+        self.add_from_workspace_button.clicked.connect(self.workspace_requested.emit)
+        self.export_pack_button = QPushButton("导出交付包")
         self.export_pack_button.setProperty("variant", "primary")
-        self.pack_history_button = QPushButton("交付历史")
-        self.cleanup_button = QPushButton("清理旧 Revision")
-        self.restore_item_button = QPushButton("恢复 Item")
-        header_layout.addWidget(self.restore_item_button)
-        header_layout.addWidget(self.pack_history_button)
+        self.refresh_button = QPushButton("刷新", self)
+        self.pack_history_button = QPushButton("交付历史", self)
+        self.cleanup_button = QPushButton("清理旧版本", self)
+        self.restore_item_button = QPushButton("恢复核心文件", self)
+        self.context_more_button = QToolButton()
+        self.context_more_button.setText("···")
+        self.context_more_button.setToolTip("更多核心文件操作")
+        self.context_more_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        context_more_menu = QMenu(self.context_more_button)
+        self.history_action = context_more_menu.addAction("交付历史", self._pack_history)
+        self.restore_item_action = context_more_menu.addAction(
+            "恢复核心文件", self._restore_item
+        )
+        self.cleanup_action = context_more_menu.addAction(
+            "清理旧版本", self._preview_cleanup
+        )
+        context_more_menu.addSeparator()
+        self.refresh_context_action = context_more_menu.addAction("刷新", self.reload)
+        self.rebuild_index_action = context_more_menu.addAction(
+            "重建内容索引", self._rebuild_content_index
+        )
+        self.recover_content_action = context_more_menu.addAction(
+            "恢复中断提取", self._recover_content_runs
+        )
+        self.ai_history_action = context_more_menu.addAction("AI 草稿历史", self._ai_history)
+        self.recover_ai_action = context_more_menu.addAction("恢复中断 AI 分析", self._recover_ai_runs)
+        context_more_menu.addSeparator()
+        self.set_ai_key_action = context_more_menu.addAction("设置模型 API 密钥", self._set_ai_key)
+        self.remove_ai_key_action = context_more_menu.addAction("清除模型 API 密钥", self._remove_ai_key)
+        self.context_more_button.setMenu(context_more_menu)
+        header_layout.addWidget(self.add_from_workspace_button)
         header_layout.addWidget(self.export_pack_button)
-        header_layout.addWidget(self.cleanup_button)
-        header_layout.addWidget(self.refresh_button)
+        header_layout.addWidget(self.context_more_button)
         outer.addWidget(header)
 
         self.stack = QStackedWidget()
@@ -380,8 +670,9 @@ class ProjectContextView(QWidget):
         splitter.setChildrenCollapsible(False)
 
         section_pane = QWidget()
+        self.section_pane = section_pane
         section_layout = QVBoxLayout(section_pane)
-        section_title = QLabel("Sections")
+        section_title = QLabel("分组")
         section_title.setObjectName("detailTitle")
         self.section_view = QListView()
         self.section_model = ContextSectionModel(self)
@@ -404,8 +695,10 @@ class ProjectContextView(QWidget):
 
         item_pane = QWidget()
         item_layout = QVBoxLayout(item_pane)
-        item_title = QLabel("Context Items")
-        item_title.setObjectName("detailTitle")
+        self.section_filter_button = QPushButton("全部核心文件  ▾")
+        self.section_filter_button.setProperty("variant", "quiet")
+        self.section_filter_button.setCheckable(True)
+        self.section_filter_button.toggled.connect(self.section_pane.setVisible)
         self.item_view = QTableView()
         self.item_model = ContextItemModel(self)
         self.item_view.setModel(self.item_model)
@@ -419,26 +712,58 @@ class ProjectContextView(QWidget):
         self.item_view.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch
         )
-        item_layout.addWidget(item_title)
+        self.item_view.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
+        item_layout.addWidget(
+            self.section_filter_button, 0, Qt.AlignmentFlag.AlignLeft
+        )
         item_layout.addWidget(self.item_view, 1)
 
         detail_pane = QWidget()
+        self.detail_pane = detail_pane
         detail_layout = QVBoxLayout(detail_pane)
-        self.detail_title = QLabel("未选择 Context Item")
+        self.detail_title = QLabel("未选择核心文件")
         self.detail_title.setObjectName("detailTitle")
-        self.detail_summary = QLabel("从中间列表选择核心文件。")
+        self.detail_summary = QLabel("")
         self.detail_summary.setWordWrap(True)
-        self.detail_summary.setTextFormat(Qt.TextFormat.RichText)
+        self.detail_summary.setObjectName("detailSubtitle")
+        self.detail_summary.setTextFormat(Qt.TextFormat.PlainText)
+        self.guidance_preview = QLabel("尚无阅读说明")
+        self.guidance_preview.setWordWrap(True)
+        self.guidance_preview.setObjectName("guidancePreview")
+        self.guidance_preview.setTextFormat(Qt.TextFormat.PlainText)
         self.guidance_edit = QTextEdit()
-        self.guidance_edit.setPlaceholderText("人工阅读说明（显式保存）")
+        self.guidance_edit.setPlaceholderText("写下阅读这份文件时应关注的内容")
         self.guidance_edit.setMaximumHeight(105)
+        self.guidance_edit.hide()
         detail_actions = QHBoxLayout()
+        self.edit_guidance_button = QPushButton("编辑说明")
+        self.edit_guidance_button.clicked.connect(
+            lambda: self._set_guidance_editing(True)
+        )
         self.save_guidance_button = QPushButton("保存说明")
-        self.advance_button = QPushButton("创建新 Revision")
+        self.cancel_guidance_button = QPushButton("取消")
+        self.cancel_guidance_button.clicked.connect(
+            lambda: self._set_guidance_editing(False)
+        )
+        self.advance_button = QPushButton("更新固定版本")
         self.remove_item_button = QPushButton("移除 Item")
+        self.remove_item_button.hide()
+        self.item_more_button = QToolButton()
+        self.item_more_button.setText("更多 ···")
+        self.item_more_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        item_more_menu = QMenu(self.item_more_button)
+        item_more_menu.addAction("移除核心文件", self._remove_item)
+        self.item_more_button.setMenu(item_more_menu)
+        detail_actions.addWidget(self.edit_guidance_button)
         detail_actions.addWidget(self.save_guidance_button)
-        detail_actions.addWidget(self.advance_button)
-        detail_actions.addWidget(self.remove_item_button)
+        detail_actions.addWidget(self.cancel_guidance_button)
+        detail_actions.addWidget(self.item_more_button)
+        self.save_guidance_button.hide()
+        self.cancel_guidance_button.hide()
         self.placement_list = QListWidget()
         self.placement_list.setMaximumHeight(95)
         placement_actions = QHBoxLayout()
@@ -448,9 +773,9 @@ class ProjectContextView(QWidget):
         placement_actions.addWidget(self.add_placement_button)
         placement_actions.addWidget(self.remove_placement_button)
         placement_actions.addWidget(self.reorder_placement_button)
-        self.revision_table = QTableWidget(0, 4)
+        self.revision_table = QTableWidget(0, 5)
         self.revision_table.setHorizontalHeaderLabels(
-            ["状态", "捕获时间", "SHA-256", "保护"]
+            ["状态", "捕获时间", "SHA-256", "保护", "内容提取"]
         )
         self.revision_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
@@ -468,24 +793,120 @@ class ProjectContextView(QWidget):
         self.protect_button = QPushButton("保护 / 取消保护")
         detail_layout.addWidget(self.detail_title)
         detail_layout.addWidget(self.detail_summary)
-        detail_layout.addWidget(QLabel("人工说明"))
+        detail_layout.addWidget(QLabel("阅读说明"))
+        detail_layout.addWidget(self.guidance_preview)
         detail_layout.addWidget(self.guidance_edit)
         detail_layout.addLayout(detail_actions)
-        detail_layout.addWidget(QLabel("Placements"))
-        detail_layout.addWidget(self.placement_list)
-        detail_layout.addLayout(placement_actions)
-        detail_layout.addWidget(QLabel("Revisions"))
-        detail_layout.addWidget(self.revision_table, 1)
-        detail_layout.addWidget(self.protect_button)
+        self.placement_toggle = QToolButton()
+        self.placement_toggle.setText("分组与位置")
+        self.placement_toggle.setCheckable(True)
+        self.placement_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.placement_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.placement_panel = QWidget()
+        placement_layout = QVBoxLayout(self.placement_panel)
+        placement_layout.setContentsMargins(0, 0, 0, 0)
+        placement_layout.addWidget(self.placement_list)
+        placement_layout.addLayout(placement_actions)
+        self.placement_panel.hide()
+        self.placement_toggle.toggled.connect(self.placement_panel.setVisible)
+        detail_layout.addWidget(self.placement_toggle)
+        detail_layout.addWidget(self.placement_panel)
+        self.revision_toggle = QToolButton()
+        self.revision_toggle.setText("版本与内容")
+        self.revision_toggle.setCheckable(True)
+        self.revision_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.revision_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.revision_panel = QWidget()
+        revision_layout = QVBoxLayout(self.revision_panel)
+        revision_layout.setContentsMargins(0, 0, 0, 0)
+        revision_layout.addWidget(self.revision_table)
+        revision_actions = QHBoxLayout()
+        revision_actions.addWidget(self.advance_button)
+        revision_actions.addWidget(self.protect_button)
+        revision_layout.addLayout(revision_actions)
+        self.revision_panel.hide()
+        self.revision_toggle.toggled.connect(self.revision_panel.setVisible)
+        detail_layout.addWidget(self.revision_toggle)
+        detail_layout.addWidget(self.revision_panel)
+
+        self.extract_button = QPushButton("提取所选 Revision")
+        self.ai_analyze_button = QPushButton("AI 辅助分析")
+        self.extract_status = QLabel("")
+        self.extract_status.setWordWrap(True)
+        self.extract_status.hide()
+        revision_layout.addWidget(self.extract_button)
+        revision_layout.addWidget(self.ai_analyze_button)
+        revision_layout.addWidget(self.extract_status)
+        detail_layout.addStretch(1)
 
         splitter.addWidget(section_pane)
         splitter.addWidget(item_pane)
         splitter.addWidget(detail_pane)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 4)
+        self.section_pane.hide()
+        self.detail_pane.hide()
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 6)
         splitter.setStretchFactor(2, 4)
-        splitter.setSizes([240, 500, 500])
+        splitter.setSizes([0, 700, 430])
         context_layout.addWidget(splitter)
+        self.content_search_toggle = QPushButton("搜索内容")
+        self.content_search_toggle.setProperty("variant", "quiet")
+        self.content_search_toggle.setCheckable(True)
+        self.content_search_toggle.toggled.connect(self._toggle_content_search)
+        context_layout.addWidget(
+            self.content_search_toggle, 0, Qt.AlignmentFlag.AlignLeft
+        )
+        self.content_search_panel = QWidget()
+        content_layout = QVBoxLayout(self.content_search_panel)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(6)
+        search_bar = QHBoxLayout()
+        self.content_query = QLineEdit()
+        self.content_query.setPlaceholderText("搜索核心文件内容")
+        self.content_search_button = QPushButton("搜索")
+        self.content_rebuild_button = QPushButton("重建索引")
+        self.content_recover_button = QPushButton("恢复中断提取")
+        search_bar.addWidget(self.content_query, 1)
+        search_bar.addWidget(self.content_search_button)
+        content_layout.addLayout(search_bar)
+        self.content_status = QLabel("")
+        self.content_status.hide()
+        content_layout.addWidget(self.content_status)
+        self.content_results = QTableWidget(0, 3)
+        self.content_results.setHorizontalHeaderLabels(["文件", "位置", "命中片段"])
+        self.content_results.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.content_results.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.content_results.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.content_results.setMaximumHeight(220)
+        content_layout.addWidget(self.content_results)
+        self.content_search_panel.hide()
+        context_layout.addWidget(self.content_search_panel)
+        self.experience_toggle = QPushButton("项目脉络")
+        self.experience_toggle.setProperty("variant", "quiet")
+        self.experience_toggle.setCheckable(True)
+        context_layout.addWidget(self.experience_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        self.experience_panel = QWidget()
+        experience_layout = QVBoxLayout(self.experience_panel)
+        experience_layout.setContentsMargins(0, 0, 0, 0)
+        self.experience_list = QListWidget()
+        self.experience_list.setMaximumHeight(180)
+        experience_layout.addWidget(self.experience_list)
+        experience_actions = QHBoxLayout()
+        self.experience_add = QPushButton("记录")
+        self.experience_edit = QPushButton("更正")
+        self.experience_confirm = QPushButton("确认")
+        self.experience_supersede = QPushButton("标记被取代")
+        for button in (self.experience_add, self.experience_edit,
+                       self.experience_confirm, self.experience_supersede):
+            experience_actions.addWidget(button)
+        experience_actions.addStretch(1)
+        experience_layout.addLayout(experience_actions)
+        self.experience_panel.hide()
+        context_layout.addWidget(self.experience_panel)
         self.stack.addWidget(self.context_page)
         outer.addWidget(self.stack, 1)
 
@@ -494,7 +915,7 @@ class ProjectContextView(QWidget):
         self.pack_history_button.clicked.connect(self._pack_history)
         self.upgrade_button.clicked.connect(self._upgrade)
         self.section_view.selectionModel().selectionChanged.connect(
-            lambda *_: self._filter_items()
+            lambda *_: self._section_changed()
         )
         self.item_view.selectionModel().selectionChanged.connect(
             lambda *_: self._item_selected()
@@ -511,8 +932,58 @@ class ProjectContextView(QWidget):
         self.remove_placement_button.clicked.connect(self._remove_placement)
         self.reorder_placement_button.clicked.connect(self._reorder_placement)
         self.protect_button.clicked.connect(self._toggle_protection)
+        self.extract_button.clicked.connect(self._extract_selected_revision)
+        self.ai_analyze_button.clicked.connect(self._plan_ai)
+        self.content_search_button.clicked.connect(self._search_content)
+        self.content_query.returnPressed.connect(self._search_content)
+        self.content_rebuild_button.clicked.connect(self._rebuild_content_index)
+        self.content_recover_button.clicked.connect(self._recover_content_runs)
+        self.content_results.cellDoubleClicked.connect(self._open_content_hit)
+        self.experience_toggle.toggled.connect(self._toggle_experience)
+        self.experience_add.clicked.connect(self._create_experience)
+        self.experience_edit.clicked.connect(self._correct_experience)
+        self.experience_confirm.clicked.connect(self._confirm_experience)
+        self.experience_supersede.clicked.connect(self._supersede_experience)
+        self.experience_list.itemSelectionChanged.connect(self._update_experience_buttons)
+        self.experience_list.itemDoubleClicked.connect(lambda *_: self._show_experience())
         self.cleanup_button.clicked.connect(self._preview_cleanup)
         self._show_no_project()
+
+    def _section_changed(self) -> None:
+        index = self.section_view.currentIndex()
+        kind, section = self.section_model.entry(index.row())
+        label = (
+            section.name if kind == "SECTION" and section is not None
+            else "未分组" if kind == "UNSECTIONED"
+            else "全部核心文件"
+        )
+        self.section_filter_button.setText(f"{label}  ▾")
+        self._filter_items()
+
+    def _set_guidance_editing(self, editing: bool) -> None:
+        if not editing and self._details is not None:
+            annotation = (
+                self._details.annotations[0]
+                if self._details.annotations else None
+            )
+            self.guidance_edit.setPlainText(
+                "" if annotation is None else annotation.body
+            )
+        self.guidance_preview.setVisible(not editing)
+        self.guidance_edit.setVisible(editing)
+        self.edit_guidance_button.setVisible(not editing)
+        self.save_guidance_button.setVisible(editing)
+        self.cancel_guidance_button.setVisible(editing)
+        if editing:
+            self.guidance_edit.setFocus()
+
+    def _toggle_content_search(self, visible: bool) -> None:
+        self.content_search_panel.setVisible(visible)
+        self.content_search_toggle.setText(
+            "关闭搜索" if visible else "搜索内容"
+        )
+        if visible:
+            self.content_query.setFocus()
 
     def set_project(
         self, project_id: str | None, database_path: Path | None,
@@ -526,6 +997,7 @@ class ProjectContextView(QWidget):
         self._details = None
         self.section_model.set_sections(())
         self.item_model.set_items(())
+        self.experience_list.clear()
         self._clear_details()
         if project_id is None:
             self._show_no_project()
@@ -576,6 +1048,8 @@ class ProjectContextView(QWidget):
         for widget in (
             self.refresh_button, self.export_pack_button, self.pack_history_button,
             self.cleanup_button, self.restore_item_button,
+            self.add_from_workspace_button, self.context_more_button,
+            self.section_filter_button, self.content_search_toggle,
             self.section_view, self.item_view, self.add_section_button,
             self.rename_section_button, self.remove_section_button,
             self.restore_section_button, self.guidance_edit,
@@ -583,6 +1057,13 @@ class ProjectContextView(QWidget):
             self.remove_item_button, self.add_placement_button,
             self.remove_placement_button, self.reorder_placement_button,
             self.revision_table, self.protect_button, self.upgrade_button,
+            self.item_more_button,
+            self.extract_button, self.content_query, self.content_search_button,
+            self.ai_analyze_button,
+            self.content_rebuild_button, self.content_results,
+            self.content_recover_button,
+            self.experience_toggle, self.experience_list, self.experience_add,
+            self.experience_edit, self.experience_confirm, self.experience_supersede,
         ):
             widget.setEnabled(not busy)
         if not busy:
@@ -644,6 +1125,8 @@ class ProjectContextView(QWidget):
         self.section_view.setCurrentIndex(self.section_model.index(0, 0))
         self._filter_items(preferred_item_id=selected_item_id)
         self._update_action_state()
+        if self.experience_panel.isVisible():
+            self._load_experiences()
 
     def _filter_items(self, *, preferred_item_id: str | None = None) -> None:
         if self._result is None:
@@ -684,32 +1167,41 @@ class ProjectContextView(QWidget):
         if item_id is None or not self._has_project():
             self._clear_details()
             return
-        try:
-            details = self._application.get_context_item_details(
-                GetContextItemDetailsRequest(
-                    project_id=self._project_id,
-                    database_path=self._database_path,
+        project_id, database_path = self._project_id, self._database_path
+        self._run(
+            "加载 Context Item",
+            lambda: (
+                self._application.get_context_item_details(GetContextItemDetailsRequest(
+                    project_id=project_id, database_path=database_path,
                     context_item_id=item_id,
-                )
-            )
-        except BaseException as exc:
-            self._show_failure("加载 Context Item", exc)
-            return
+                )),
+                self._application.get_content_item_runs(project_id, database_path, item_id),
+            ),
+            lambda result: self._apply_item_details(*result),
+        )
+
+    def _apply_item_details(self, details, runs) -> None:
         self._details = details
+        self.detail_pane.show()
         view = details.view
-        revision = view.current_revision
         title = view.item.title_override or view.workspace_item.display_name
         self.detail_title.setText(title)
+        freshness = {
+            "CURRENT": "已固定版本",
+            "WORKSPACE_UPDATED": "有更新待确认",
+            "WORKSPACE_MISSING": "工作文件缺失",
+            "WORKSPACE_UNREADABLE": "工作文件无法读取",
+        }.get(view.freshness.value, view.freshness.value)
         self.detail_summary.setText(
-            "<table>"
-            f"<tr><td>Workspace 文件</td><td>{html.escape(view.workspace_item.display_name)}</td></tr>"
-            f"<tr><td>Freshness</td><td><b>{view.freshness.value}</b></td></tr>"
-            f"<tr><td>Current Revision</td><td>{'—' if revision is None else html.escape(revision.id)}</td></tr>"
-            f"<tr><td>SHA-256</td><td>{'—' if revision is None else html.escape(revision.source_observed_sha256 or '—')}</td></tr>"
-            "</table>"
+            " · ".join(part for part in (view.item.purpose, freshness) if part)
         )
         annotation = details.annotations[0] if details.annotations else None
         self.guidance_edit.setPlainText("" if annotation is None else annotation.body)
+        self.guidance_preview.setText(
+            "尚无阅读说明" if annotation is None or not annotation.body
+            else annotation.body
+        )
+        self._set_guidance_editing(False)
         sections = {value.id: value for value in self._result.sections}
         self.placement_list.clear()
         for placement in view.effective_placements:
@@ -721,6 +1213,9 @@ class ProjectContextView(QWidget):
             self.placement_list.item(row).setData(CONTEXT_ID_ROLE, section.id)
             self.placement_list.item(row).setData(CONTEXT_KIND_ROLE, placement.id)
         self.revision_table.setRowCount(0)
+        run_by_revision = {}
+        for run in runs:
+            run_by_revision.setdefault(run.context_revision_id, run)
         for value in details.revisions:
             row = self.revision_table.rowCount()
             self.revision_table.insertRow(row)
@@ -729,19 +1224,31 @@ class ProjectContextView(QWidget):
                 value.created_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
                 value.source_observed_sha256 or "",
                 "已保护" if value.is_manually_protected else "",
+                (run_by_revision[value.id].status.value
+                 if value.id in run_by_revision else "未提取"),
             )
             for column, text in enumerate(cells):
                 cell = QTableWidgetItem(text)
                 if column == 0:
                     cell.setData(CONTEXT_ID_ROLE, value.id)
                 self.revision_table.setItem(row, column, cell)
+        current_revision_id = view.item.current_context_revision_id
+        for row in range(self.revision_table.rowCount()):
+            cell = self.revision_table.item(row, 0)
+            if cell is not None and cell.data(CONTEXT_ID_ROLE) == current_revision_id:
+                self.revision_table.selectRow(row)
+                break
+        self.extract_status.hide()
         self._update_action_state()
 
     def _clear_details(self) -> None:
         self._details = None
         if hasattr(self, "detail_title"):
-            self.detail_title.setText("未选择 Context Item")
-            self.detail_summary.setText("从中间列表选择核心文件。")
+            self.detail_pane.hide()
+            self.detail_title.setText("未选择核心文件")
+            self.detail_summary.setText("")
+            self.guidance_preview.setText("")
+            self._set_guidance_editing(False)
             self.guidance_edit.clear()
             self.placement_list.clear()
             self.revision_table.setRowCount(0)
@@ -1023,6 +1530,253 @@ class ProjectContextView(QWidget):
             ),
         )
 
+    def _extract_selected_revision(self) -> None:
+        rows = self.revision_table.selectionModel().selectedRows()
+        if not self._has_project() or len(rows) != 1:
+            return
+        revision_id = self.revision_table.item(rows[0].row(), 0).data(CONTEXT_ID_ROLE)
+        if QMessageBox.question(
+            self, "提取固定版本内容",
+            "将把所选固定 Revision 的可检索正文及位置写入本项目 project.sqlite。"
+            "不读取后来变化的 Workspace 文件，也不会上传内容。继续？",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._run(
+            "提取 Context 内容",
+            lambda control: self._application.extract_context_revisions(
+                ExtractContextRevisionsRequest(
+                    project_id=self._project_id, database_path=self._database_path,
+                    revision_ids=(revision_id,), actor=self._actor,
+                ), control=control,
+            ),
+            self._content_extraction_completed,
+            progress=True,
+        )
+
+    def _content_extraction_completed(self, result) -> None:
+        run = result.runs[0]
+        self.extract_status.setText(
+            f"{run.status.value} · {run.element_count} 个元素"
+            + (" · " + run.error_code if run.error_code else "")
+        )
+        self.extract_status.show()
+        if run.status.value not in ("SUCCEEDED", "PARTIAL"):
+            QMessageBox.information(self, "提取结果", self.extract_status.text())
+
+    def _plan_ai(self) -> None:
+        rows = self.revision_table.selectionModel().selectedRows()
+        if not self._has_project() or len(rows) != 1 or self._result is None:
+            return
+        revision_id = self.revision_table.item(rows[0].row(), 0).data(CONTEXT_ID_ROLE)
+        others = [(view.item.current_context_revision_id,
+                   view.item.title_override or view.workspace_item.display_name)
+                  for view in self._result.items
+                  if view.item.current_context_revision_id
+                  and view.item.current_context_revision_id != revision_id]
+        if self._details is not None:
+            title = (self._details.view.item.title_override
+                     or self._details.view.workspace_item.display_name)
+            known = {value[0] for value in others}
+            for revision in self._details.revisions:
+                if (revision.id != revision_id
+                        and revision.capture_status == ContextRevisionCaptureStatus.READY
+                        and revision.id not in known):
+                    others.append((revision.id,
+                                   f"{title} · {revision.created_at.astimezone():%Y-%m-%d %H:%M}"))
+                    known.add(revision.id)
+        dialog = AIActionDialog(profiles=self._application.get_analysis_models(),
+                                other_revisions=others, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        action = AnalysisAction(dialog.action.currentData())
+        revisions = (revision_id, dialog.other_revision.currentData()) if (
+            action == AnalysisAction.COMPARE) else (revision_id,)
+        provider, model = dialog.model.currentData()
+        request = AnalysisPlanRequest(self._project_id, self._database_path,
+                                      action, revisions, provider, model)
+        self._run("准备 AI 输入预览", lambda: self._application.plan_ai_analysis(request),
+                  self._show_ai_plan)
+
+    def _show_ai_plan(self, plan) -> None:
+        dialog = AIPlanPreviewDialog(plan,
+            can_execute=self._application.can_execute_ai_analysis(plan), parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._run("AI 辅助分析", lambda: self._application.execute_ai_analysis(
+            plan, actor=self._actor, confirmed_token=plan.consent_token),
+            self._show_ai_result)
+
+    def _show_ai_result(self, result) -> None:
+        if result.status.value != "SUCCEEDED":
+            QMessageBox.warning(self, "AI 分析未完成",
+                                f"草稿状态：{result.status.value} · {result.error_code or '未知错误'}")
+            return
+        dialog = AIResultDialog(result, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_revision_id:
+            revision_id = dialog.selected_revision_id
+            self._run("打开 AI 引用的固定版本", lambda: self._application.open_context_revision(
+                OpenContextRevisionRequest(self._project_id, self._database_path,
+                                           revision_id)), lambda _result: None)
+
+    def _ai_history(self) -> None:
+        if not self._has_project() or self._busy:
+            return
+        self._run("读取 AI 草稿", lambda: self._application.list_ai_analyses(
+            self._project_id, self._database_path), self._choose_ai_history)
+
+    def _recover_ai_runs(self) -> None:
+        if not self._has_project() or self._busy:
+            return
+        if QMessageBox.question(
+            self, "恢复中断 AI 分析",
+            "请先确认本机没有仍在运行的 AI 请求。此操作仅把上次中断的 RUNNING 草稿"
+            "标为 INTERRUPTED，不会重发请求。继续？",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._run("恢复中断 AI 分析", lambda: self._application.recover_interrupted_ai_analyses(
+            self._project_id, self._database_path, actor=self._actor),
+            lambda count: QMessageBox.information(
+                self, "恢复完成", f"已标记 {count} 条中断草稿；未重新外发。"))
+
+    def _choose_ai_provider(self) -> str | None:
+        provider, accepted = QInputDialog.getItem(
+            self, "模型 Provider", "选择 Provider", ["openai", "deepseek"], 0, False,
+        )
+        return provider if accepted else None
+
+    def _set_ai_key(self) -> None:
+        provider = self._choose_ai_provider()
+        if provider is None:
+            return
+        secret, accepted = QInputDialog.getText(
+            self, "设置模型 API 密钥", f"{provider} API 密钥",
+            QLineEdit.EchoMode.Password,
+        )
+        if not accepted or not secret:
+            return
+        if QMessageBox.question(
+            self, "保存密钥",
+            "密钥只写入本机 Windows 凭据管理器，不写入项目库。"
+            "当前真实外发仍被资格 Gate 禁止；保存密钥不会自动调用 API。继续？",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._run("保存模型密钥", lambda: self._application.save_ai_credential(
+            provider, secret),
+            lambda _result: QMessageBox.information(self, "密钥已保存",
+                                                   "已保存在本机凭据管理器；没有发送资料。"))
+
+    def _remove_ai_key(self) -> None:
+        provider = self._choose_ai_provider()
+        if provider is None:
+            return
+        if QMessageBox.question(self, "清除模型密钥",
+                                f"从本机凭据管理器清除 {provider} 的 PIG 密钥？") != QMessageBox.StandardButton.Yes:
+            return
+        self._run("清除模型密钥", lambda: self._application.remove_ai_credential(provider),
+                  lambda _result: QMessageBox.information(self, "密钥已清除",
+                                                         "本机 PIG 凭据已清除。"))
+
+    def _choose_ai_history(self, rows) -> None:
+        if not rows:
+            QMessageBox.information(self, "AI 草稿", "尚无 AI 草稿。")
+            return
+        labels = [f"{row[5].astimezone():%Y-%m-%d %H:%M} · {row[1].value} · "
+                  f"{row[2]}/{row[3]} · {row[4].value} · {row[0][:8]}" for row in rows]
+        choice, accepted = QInputDialog.getItem(self, "AI 草稿历史", "选择草稿",
+                                                labels, 0, False)
+        if accepted:
+            run_id = rows[labels.index(choice)][0]
+            self._run("读取 AI 草稿", lambda: self._application.get_ai_analysis(
+                self._project_id, self._database_path, run_id), self._show_ai_result)
+
+    def _search_content(self) -> None:
+        query = self.content_query.text().strip()
+        if not self._has_project() or not query:
+            return
+        self._run(
+            "搜索 Context 内容",
+            lambda: self._application.search_context_content(
+                SearchContextContentRequest(
+                    project_id=self._project_id, database_path=self._database_path,
+                    query=query,
+                )
+            ),
+            self._show_content_hits,
+        )
+
+    def _show_content_hits(self, result) -> None:
+        self.content_results.setRowCount(0)
+        for hit in result.hits:
+            row = self.content_results.rowCount()
+            self.content_results.insertRow(row)
+            values = (
+                hit.title,
+                f"{hit.locator_kind}: {hit.locator_value}",
+                hit.snippet,
+            )
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(value)
+                cell.setData(CONTEXT_ID_ROLE, hit.context_revision_id)
+                if column == 0:
+                    cell.setToolTip("双击打开固定版本的只读副本")
+                self.content_results.setItem(row, column, cell)
+        self.content_status.setText(f"找到 {result.total} 条")
+        self.content_status.show()
+
+    def _open_content_hit(self, row: int, _column: int) -> None:
+        item = self.content_results.item(row, 0)
+        if item is None or not self._has_project():
+            return
+        revision_id = item.data(CONTEXT_ID_ROLE)
+        self._run(
+            "打开固定 Revision 副本",
+            lambda: self._application.open_context_revision(
+                OpenContextRevisionRequest(
+                    project_id=self._project_id, database_path=self._database_path,
+                    revision_id=revision_id,
+                )
+            ),
+            lambda _result: None,
+        )
+
+    def _rebuild_content_index(self) -> None:
+        if not self._has_project():
+            return
+        if QMessageBox.question(self, "重建内容索引",
+                                "从已保存的内容元素重建搜索索引；不重新读取文件。继续？") != QMessageBox.StandardButton.Yes:
+            return
+        self._run(
+            "重建 Context 索引",
+            lambda: self._application.rebuild_context_index(
+                RebuildContextIndexRequest(
+                    project_id=self._project_id, database_path=self._database_path,
+                    actor=self._actor,
+                )
+            ),
+            lambda result: QMessageBox.information(self, "索引已重建",
+                                                   f"已索引 {result.element_count} 个内容元素。"),
+        )
+
+    def _recover_content_runs(self) -> None:
+        if not self._has_project():
+            return
+        if QMessageBox.question(
+            self, "恢复中断提取", "确认没有其他 PIG 实例或提取任务仍在处理此项目？"
+            "确认后，遗留 RUNNING 记录会标记失败，可再次显式提取。",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._run(
+            "恢复中断提取",
+            lambda: self._application.recover_interrupted_content(
+                RecoverInterruptedContentRequest(
+                    project_id=self._project_id, database_path=self._database_path,
+                    actor=self._actor, confirmed_no_active_extraction=True,
+                )
+            ),
+            lambda result: QMessageBox.information(self, "恢复完成",
+                                                   f"已恢复 {len(result.recovered_run_ids)} 个中断记录。"),
+        )
+
     def _preview_cleanup(self) -> None:
         if not self._has_project():
             return
@@ -1083,6 +1837,142 @@ class ProjectContextView(QWidget):
         QMessageBox.information(self, "Context 清理完成", message)
         self.reload()
 
+    def _toggle_experience(self, visible: bool) -> None:
+        self.experience_panel.setVisible(visible)
+        if visible:
+            self._load_experiences()
+
+    def _load_experiences(self) -> None:
+        if not self._has_project() or self._busy:
+            return
+        self._run(
+            "加载项目脉络",
+            lambda: self._application.list_experience_summaries(
+                project_id=self._project_id, database_path=self._database_path,
+                limit=50,
+            ),
+            self._apply_experiences,
+        )
+
+    def _apply_experiences(self, summaries) -> None:
+        selected_id = self._selected_experience_id()
+        self.experience_list.clear()
+        names = {ExperienceKind.JUDGMENT: "判断", ExperienceKind.DECISION: "决定",
+                 ExperienceKind.LESSON: "经验"}
+        states = {ExperienceStatus.DRAFT: "草稿", ExperienceStatus.CONFIRMED: "已确认",
+                  ExperienceStatus.SUPERSEDED: "已取代"}
+        for summary in summaries:
+            record = summary.record
+            entry = QListWidgetItem(
+                f"{names[record.kind]} · {summary.title} · {states[record.status]}"
+            )
+            entry.setData(CONTEXT_ID_ROLE, record.id)
+            entry.setToolTip(f"{summary.author} · {record.updated_at.astimezone():%Y-%m-%d %H:%M}")
+            self.experience_list.addItem(entry)
+            if record.id == selected_id:
+                self.experience_list.setCurrentItem(entry)
+        self._update_experience_buttons()
+
+    def _selected_experience_id(self) -> str | None:
+        item = self.experience_list.currentItem()
+        return None if item is None else item.data(CONTEXT_ID_ROLE)
+
+    def _update_experience_buttons(self) -> None:
+        selected = self._selected_experience_id() is not None
+        self.experience_edit.setEnabled(selected and not self._busy)
+        self.experience_confirm.setEnabled(selected and not self._busy)
+        self.experience_supersede.setEnabled(selected and not self._busy)
+
+    def _experience_choices(self, detail=None):
+        preferred = self._selected_item_id()
+        choices = []
+        seen = set()
+        for view in self._result.items:
+            revision_id = view.item.current_context_revision_id
+            if revision_id:
+                choices.append((view.item.id, revision_id,
+                                view.item.title_override or view.workspace_item.display_name,
+                                view.item.id == preferred))
+                seen.add((view.item.id, revision_id))
+        if detail is not None:
+            for link in detail.revision_links:
+                key = (link.context_item_id, link.context_revision_id)
+                if key not in seen:
+                    choices.append((*key, f"历史固定版本 · {link.context_revision_id[:8]}", False))
+        return tuple(choices)
+
+    def _create_experience(self) -> None:
+        if not self._has_project() or self._result is None or self._busy:
+            return
+        self._show_create_experience()
+
+    def _show_create_experience(self) -> None:
+        dialog = ExperienceDialog(self._experience_choices(), parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        request = ExperienceMutationRequest(
+            project_id=self._project_id, database_path=self._database_path,
+            actor=self._actor, expected_context_revision=self._context_revision,
+            kind=ExperienceKind(dialog.kind.currentData()), title=dialog.derived_title,
+            body=dialog.body.toPlainText().strip(), evidence=dialog.selected_evidence,
+            event_ids=(),
+        )
+        self._run("记录项目脉络", lambda: self._application.create_experience(request),
+                  lambda _result: self.reload())
+
+    def _selected_experience_detail(self, callback) -> None:
+        record_id = self._selected_experience_id()
+        if not record_id or self._busy:
+            return
+        self._run("读取人工记录", lambda: self._application.get_experience(
+            project_id=self._project_id, database_path=self._database_path,
+            record_id=record_id), callback)
+
+    def _show_experience(self) -> None:
+        self._selected_experience_detail(
+            lambda detail: ExperienceHistoryDialog(detail, self).exec())
+
+    def _correct_experience(self) -> None:
+        self._selected_experience_detail(self._show_experience_edit)
+
+    def _show_experience_edit(self, detail) -> None:
+        self._show_experience_edit_dialog(detail)
+
+    def _show_experience_edit_dialog(self, detail) -> None:
+        dialog = ExperienceDialog(self._experience_choices(detail), initial=detail, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        request = ExperienceMutationRequest(
+            project_id=self._project_id, database_path=self._database_path,
+            actor=self._actor, expected_context_revision=self._context_revision,
+            kind=detail.record.kind, title=dialog.derived_title,
+            body=dialog.body.toPlainText().strip(), evidence=dialog.selected_evidence,
+            event_ids=tuple(link.event_id for link in detail.event_links),
+            record_id=detail.record.id, expected_record_version=detail.record.current_version,
+        )
+        self._run("更正人工记录", lambda: self._application.correct_experience(request),
+                  lambda _result: self.reload())
+
+    def _confirm_experience(self) -> None:
+        self._selected_experience_detail(lambda detail: self._transition_experience(detail, True))
+
+    def _supersede_experience(self) -> None:
+        self._selected_experience_detail(lambda detail: self._transition_experience(detail, False))
+
+    def _transition_experience(self, detail, confirm: bool) -> None:
+        label = "确认" if confirm else "标记被取代"
+        if QMessageBox.question(self, label + "人工记录",
+                                f"确定要{label}“{detail.versions[-1].title}”吗？") != QMessageBox.StandardButton.Yes:
+            return
+        request = ExperienceTransitionRequest(
+            project_id=self._project_id, database_path=self._database_path,
+            actor=self._actor, expected_context_revision=self._context_revision,
+            record_id=detail.record.id, expected_record_version=detail.record.current_version,
+        )
+        action = (self._application.confirm_experience if confirm
+                  else self._application.supersede_experience)
+        self._run(label + "人工记录", lambda: action(request), lambda _result: self.reload())
+
     def _export_pack(self) -> None:
         if not self._has_project() or self._result is None or self._busy:
             return
@@ -1092,20 +1982,26 @@ class ProjectContextView(QWidget):
             return
         self._run(
             "读取 Context Revisions",
-            lambda: tuple((view, self._application.get_context_item_details(
+            lambda: (tuple((view, self._application.get_context_item_details(
                 GetContextItemDetailsRequest(
                     project_id=self._project_id, database_path=self._database_path,
                     context_item_id=view.item.id,
                 )).revisions) for view in views),
+                self._application.list_experience_summaries(
+                    project_id=self._project_id, database_path=self._database_path,
+                    limit=50,
+                )),
             self._show_pack_dialog,
         )
 
-    def _show_pack_dialog(self, rows) -> None:
-        dialog = ContextPackDialog(self._result.project.name, rows, self)
+    def _show_pack_dialog(self, payload) -> None:
+        rows, records = payload
+        dialog = ContextPackDialog(self._result.project.name, rows, records, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         selected_ids = dialog.selected_item_ids
         revision_choices = dialog.revision_choices
+        record_ids = dialog.selected_record_ids
         self._run(
             "预检 Context Pack",
             lambda control: self._application.preflight_context_pack_export(
@@ -1114,13 +2010,16 @@ class ProjectContextView(QWidget):
                     destination_path=Path(dialog.destination.text().strip()),
                     format=ContextPackFormat(dialog.format_choice.currentData()), actor=self._actor,
                     selected_item_ids=selected_ids, revision_choices=revision_choices,
+                    selected_record_ids=record_ids,
                 ), control=control,
             ),
-            lambda result: self._confirm_pack_export(result, selected_ids, revision_choices),
+            lambda result: self._confirm_pack_export(result, selected_ids, revision_choices,
+                                                     record_ids),
             progress=True,
         )
 
-    def _confirm_pack_export(self, preflight, selected_ids, revision_choices) -> None:
+    def _confirm_pack_export(self, preflight, selected_ids, revision_choices,
+                             record_ids) -> None:
         warning = (
             f"\n注意：{len(preflight.plan.warning_item_ids)} 个固定 Revision 对应的 Workspace 已变化。"
             if preflight.plan.warning_item_ids else ""
@@ -1129,6 +2028,7 @@ class ProjectContextView(QWidget):
             self, "确认导出 Context Pack",
             f"格式：{preflight.format.value}\n"
             f"文件：{len(preflight.plan.entries)} 个 · {_format_bytes(preflight.plan.total_bytes)}\n"
+            f"人工记录：{len(record_ids)} 条 · 清单版本 {preflight.plan.manifest_schema_version}\n"
             f"位置：{preflight.destination_path}{warning}\n\n"
             "将仅使用已锁定的 Context 字节，不回退到 Workspace 或 Original。是否继续？",
         )
@@ -1141,7 +2041,8 @@ class ProjectContextView(QWidget):
                     project_id=self._project_id, database_path=self._database_path,
                     export_id=preflight.export_id, plan_token=preflight.plan_token,
                     actor=self._actor, selected_item_ids=selected_ids,
-                    revision_choices=revision_choices, confirm_outdated=bool(warning),
+                    revision_choices=revision_choices, selected_record_ids=record_ids,
+                    confirm_outdated=bool(warning),
                 ), control=control,
             ),
             lambda result: QMessageBox.information(
@@ -1248,24 +2149,58 @@ class ProjectContextView(QWidget):
         self.cleanup_button.setEnabled(active)
         self.export_pack_button.setEnabled(active and bool(self._result.items))
         self.pack_history_button.setEnabled(active)
+        self.add_from_workspace_button.setEnabled(
+            self._has_project() and not self._busy
+        )
+        self.context_more_button.setEnabled(active)
+        self.section_filter_button.setEnabled(active)
+        self.content_search_toggle.setEnabled(active)
+        self.history_action.setEnabled(active)
+        self.cleanup_action.setEnabled(active)
+        self.refresh_context_action.setEnabled(
+            self._has_project() and not self._busy
+        )
+        self.rebuild_index_action.setEnabled(active)
+        self.recover_content_action.setEnabled(active)
+        self.ai_history_action.setEnabled(active)
+        self.recover_ai_action.setEnabled(active)
+        self.set_ai_key_action.setEnabled(active)
+        self.remove_ai_key_action.setEnabled(active)
         self.restore_section_button.setEnabled(
             active and bool(self._result.removed_sections)
         )
         self.restore_item_button.setEnabled(active and bool(self._result.removed_items))
+        self.restore_item_action.setEnabled(
+            active and bool(self._result.removed_items)
+        )
         self.add_section_button.setEnabled(active)
         self.rename_section_button.setEnabled(active and section is not None)
         self.remove_section_button.setEnabled(active and section is not None)
         for button in (
             self.save_guidance_button, self.advance_button, self.remove_item_button,
-            self.add_placement_button,
+            self.add_placement_button, self.edit_guidance_button,
+            self.item_more_button,
         ):
             button.setEnabled(active and item is not None)
+        self.placement_toggle.setEnabled(active and item is not None)
+        self.revision_toggle.setEnabled(active and item is not None)
         placement = self._selected_placement()
         self.remove_placement_button.setEnabled(active and placement is not None)
         self.reorder_placement_button.setEnabled(active and placement is not None)
         self.protect_button.setEnabled(
             active and len(self.revision_table.selectionModel().selectedRows()) == 1
         )
+        selected_revisions = self.revision_table.selectionModel().selectedRows()
+        self.extract_button.setEnabled(
+            active and len(selected_revisions) == 1 and self._details is not None and
+            any(value.id == self.revision_table.item(selected_revisions[0].row(), 0).data(CONTEXT_ID_ROLE)
+                and value.capture_status == ContextRevisionCaptureStatus.READY
+                for value in self._details.revisions)
+        )
+        self.ai_analyze_button.setEnabled(self.extract_button.isEnabled())
+        self.content_search_button.setEnabled(active)
+        self.content_rebuild_button.setEnabled(active)
+        self.content_recover_button.setEnabled(active)
 
     def _show_no_project(self) -> None:
         if not hasattr(self, "stack"):

@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import QPointF, QUrl
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFileDialog,
     QInputDialog,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from pig.application import CreateProjectRequest, OperationStage
+from pig.application.contracts import CreateWorkspaceFolderRequest
 from pig.bootstrap import create_local_application
 from pig.domain.enums import (
     NodeFormat,
@@ -55,6 +57,127 @@ def _wait_idle(qt_app, window: MainWindow, timeout: float = 15) -> None:
             idle_since = None
         time.sleep(0.01)
     raise AssertionError(f"desktop did not become idle: {window._busy_operation}")
+
+
+def test_tree_expansion_drag_target_move_undo_and_rename(
+    qt_app, tmp_path: Path, monkeypatch
+) -> None:
+    application = create_local_application(tmp_path / "projects")
+    project = application.create_project(
+        CreateProjectRequest(name="Workspace interactions", actor="tester")
+    )
+    def folder(name: str, revision: int, parent=None):
+        return application.create_workspace_folder(CreateWorkspaceFolderRequest(
+            project_id=project.project_id,
+            database_path=project.database_path,
+            display_name=name,
+            actor="tester",
+            expected_workspace_revision=revision,
+            parent_workspace_item_id=parent,
+        ))
+    first = folder("A", 0)
+    second = folder("B", 1)
+    child = folder("child", 2, first.item.id)
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *_args: None))
+    window = MainWindow(application, actor="tester")
+    window._activate_project(project.project_id, project.database_path)
+    _wait_idle(qt_app, window)
+    first_index = window.tree.model().index_for_id(first.item.id)
+    window.tree.setExpanded(first_index, False)
+    window._reload_workspace()
+    _wait_idle(qt_app, window)
+    assert not window.tree.isExpanded(window.tree.model().index_for_id(first.item.id))
+    first_item = window.tree.topLevelItem(0)
+    window._tree_double_clicked(first_item, 0)
+    assert window.tree.isExpanded(window.tree.model().index_for_id(first.item.id))
+    second_item = window.tree.topLevelItem(1)
+    parent_id, ordinal, hint = window.tree._drop_destination(
+        second_item, QAbstractItemView.DropIndicatorPosition.OnItem
+    )
+    assert (parent_id, ordinal) == (second.item.id, 0)
+    assert "放入文件夹「B」" in hint
+    window._move_item(first.item.id, first.item.id, 0)
+    assert window._worker_thread is None
+    assert window._workspace_revision == 3
+    window._show_drag_destination(hint)
+    assert not window.drag_destination.isHidden()
+    window._show_drag_destination("")
+
+    window._move_item(child.item.id, second.item.id, 0)
+    _wait_idle(qt_app, window)
+    assert window.undo_move_action.isEnabled()
+    assert window._views[child.item.id].placement.parent_workspace_item_id == second.item.id
+    window._undo_last_move()
+    _wait_idle(qt_app, window)
+    assert window._views[child.item.id].placement.parent_workspace_item_id == first.item.id
+    assert not window.undo_move_action.isEnabled()
+    revision_after_undo = window._workspace_revision
+    window._move_item(child.item.id, first.item.id, 0)
+    assert window._workspace_revision == revision_after_undo
+    assert window._worker_thread is None
+    activity = [
+        window.events.item(row, 2).text()
+        for row in range(window.events.rowCount())
+    ]
+    assert "已撤销移动" in activity
+    assert "WORKSPACE_ITEM_MOVED" not in activity
+
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(
+        lambda *_args, **_kwargs: ("renamed", True)
+    ))
+    window._rename_item(child.item.id)
+    _wait_idle(qt_app, window)
+    assert window._views[child.item.id].workspace_path == "A/renamed"
+    assert window.advanced_panel.layout().itemAt(2).layout().itemAt(2).widget() is window.rollback_button
+    window.close()
+
+
+def test_search_open_and_new_folder_resume_after_confirmed_recovery(
+    qt_app, tmp_path: Path, monkeypatch
+) -> None:
+    opener = RecordingOpener()
+    application = create_local_application(tmp_path / "projects", file_opener=opener)
+    project = application.create_project(
+        CreateProjectRequest(name="Recovery B01 B02", actor="tester")
+    )
+    source = tmp_path / "项目简报.txt"
+    source.write_bytes(b"synthetic brief")
+    questions = []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *_args: None))
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(
+        lambda _parent, title, message: (
+            questions.append((title, message)) or QMessageBox.StandardButton.Yes
+        )
+    ))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(
+        lambda *_args, **_kwargs: ("待确认", True)
+    ))
+    window = MainWindow(application, actor="tester")
+    window._activate_project(project.project_id, project.database_path)
+    _wait_idle(qt_app, window)
+    window._add_inputs((source,), None)
+    _wait_idle(qt_app, window)
+    residue = project.workspace_path / ".staging" / "materializations" / "interrupted-test"
+    residue.mkdir(parents=True)
+    (residue / "partial").write_bytes(b"incomplete synthetic data")
+
+    window.search_text.setText("项目简报")
+    window._search()
+    _wait_idle(qt_app, window)
+    assert window.search_results.rowCount() == 1
+    window._search_double_clicked(window.search_results.item(0, 0), 0)
+    _wait_idle(qt_app, window)
+    assert any(title == "项目需要恢复" for title, _message in questions)
+    assert not residue.exists()
+    assert not window._recovery_required
+
+    window._search_double_clicked(window.search_results.item(0, 0), 0)
+    _wait_idle(qt_app, window)
+    assert len(opener.paths) == 1
+    window._create_folder()
+    _wait_idle(qt_app, window)
+    assert any(view.item.display_name == "待确认" for view in window._views.values())
+    window.close()
 
 
 def test_complete_workbench_ui_flow_uses_workspace_actions(
@@ -305,6 +428,27 @@ def test_new_project_uses_selected_storage_and_loads_empty_workspace(
     assert "用户项目" in window.project_location.text()
     assert messages[0][0] == "项目已创建"
     assert not default_root.exists()
+    window.close()
+
+
+def test_new_project_permission_failure_explains_storage_access(
+    qt_app, tmp_path: Path, monkeypatch
+) -> None:
+    app = create_local_application(tmp_path / "default")
+    window = MainWindow(app, actor="tester")
+    warnings = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda _parent, title, message: warnings.append((title, message))),
+    )
+    denied_path = str(tmp_path / "selected")
+    window._show_failure(
+        "创建项目", PermissionError(13, "Permission denied", denied_path)
+    )
+    assert warnings[0][0] == "创建项目"
+    assert "无法写入" in warnings[0][1]
+    assert denied_path in warnings[0][1]
     window.close()
 
 

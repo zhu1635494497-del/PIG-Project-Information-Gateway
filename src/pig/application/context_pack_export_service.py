@@ -11,6 +11,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from pig.application.context_pack_plan_service import ContextPackPlanService
+from pig.application.experience_contracts import extend_context_manifest_v2
 from pig.application.contracts import (
     CancelContextPackPreflightRequest,
     RecoverInterruptedContextPackExportsRequest,
@@ -58,6 +59,7 @@ class ContextPackExportService:
         plan = self._plans.get_plan(GetContextPackPlanRequest(
             project_id=project_id, database_path=db,
             selected_item_ids=request.selected_item_ids, revision_choices=request.revision_choices,
+            selected_record_ids=request.selected_record_ids,
         ))
         self._limit(plan)
         raw_target = Path(request.destination_path).expanduser()
@@ -142,6 +144,7 @@ class ContextPackExportService:
             plan = self._plans.get_plan(GetContextPackPlanRequest(
                 project_id=project_id, database_path=db,
                 selected_item_ids=request.selected_item_ids, revision_choices=request.revision_choices,
+                selected_record_ids=request.selected_record_ids,
             ))
             if (plan.context_revision != export.captured_context_revision
                     or plan.plan_fingerprint != export.plan_fingerprint
@@ -341,7 +344,7 @@ class ContextPackExportService:
     @staticmethod
     def _manifest(plan, export_id: str) -> bytes:
         value = {
-            "schema_version": plan.manifest_schema_version,
+            "schema_version": "1.0",
             "export_id": export_id,
             "project": {"id": plan.project_id, "name": plan.project_name},
             "context_revision": plan.context_revision,
@@ -357,6 +360,10 @@ class ContextPackExportService:
                          "guidance_author": value.guidance_author,
                          "freshness_at_export": value.freshness.value} for value in plan.entries],
         }
+        if plan.experience_records:
+            value = extend_context_manifest_v2(
+                base_manifest=value, records=plan.experience_records,
+                observed_events=plan.observed_events)
         return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
     @staticmethod

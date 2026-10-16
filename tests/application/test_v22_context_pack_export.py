@@ -325,6 +325,9 @@ def test_same_named_files_remain_distinct_and_pack_once_each(tmp_path: Path) -> 
     target = tmp_path / "same-name.zip"
     preflight = _preflight(app, project, target, ContextPackFormat.ZIP)
     assert len(preflight.plan.entries) == 2
+    assert {entry.relative_path for entry in preflight.plan.entries} == {
+        "files/brief.txt", "files/brief (2).txt",
+    }
     result = _execute(app, project, preflight)
     assert result.export.status == ContextPackExportStatus.SUCCEEDED
     with zipfile.ZipFile(target) as archive:
@@ -332,6 +335,15 @@ def test_same_named_files_remain_distinct_and_pack_once_each(tmp_path: Path) -> 
         assert len({value["relative_path"] for value in manifest["entries"]}) == 2
         payloads = {archive.read(value["relative_path"]) for value in manifest["entries"]}
         assert payloads == {b"approved project brief", b"a different approved brief"}
+
+
+def test_directory_pack_uses_readable_filenames_directly_under_files(tmp_path: Path) -> None:
+    app, project, _ = _project(tmp_path)
+    target = tmp_path / "readable-pack"
+    preflight = _preflight(app, project, target, ContextPackFormat.DIRECTORY)
+    _execute(app, project, preflight)
+    assert (target / "files" / "brief.txt").read_bytes() == b"approved project brief"
+    assert not any(path.is_dir() for path in (target / "files").iterdir())
 
 
 def test_large_file_streams_with_progress(tmp_path: Path) -> None:

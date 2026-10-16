@@ -126,6 +126,17 @@ class LocalInspectionCache(AbstractContextManager):
 
 
 class LocalWorkingArtifactStore:
+    def display_path(self, project_path: Path, storage_key: str) -> Optional[Path]:
+        """Return an existing regular Working file without materializing or refreshing it."""
+        _project, target = self._controlled_path(project_path, storage_key)
+        try:
+            value = target.lstat()
+        except FileNotFoundError:
+            return None
+        if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+            raise ApplicationError("UNSAFE_WORKSPACE", "Working path is not a regular file")
+        return target
+
     def materialize(
         self,
         project_path: Path,

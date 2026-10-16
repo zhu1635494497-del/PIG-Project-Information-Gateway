@@ -17,6 +17,15 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
+_DERIVED_FTS_TABLES = {
+    "content_fts", "content_fts_config", "content_fts_data",
+    "content_fts_docsize", "content_fts_idx",
+}
+
+
+def include_name(name: str | None, type_: str, parent_names: dict) -> bool:
+    return not (type_ == "table" and name in _DERIVED_FTS_TABLES)
+
 
 def render_item(type_: str, obj: object, autogen_context: object) -> object:
     """Keep revision files independent from application-defined runtime types."""
@@ -38,6 +47,7 @@ def run_migrations_offline() -> None:
         compare_type=True,
         render_as_batch=True,
         render_item=render_item,
+        include_name=include_name,
     )
 
     with context.begin_transaction():
@@ -67,6 +77,7 @@ def run_migrations_online() -> None:
             compare_type=True,
             render_as_batch=True,
             render_item=render_item,
+            include_name=include_name,
         )
 
         with context.begin_transaction():

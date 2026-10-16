@@ -45,6 +45,8 @@ from pig.domain.enums import (
     ContextRevisionSourceKind,
     ContextPackFormat,
     ContextPackExportStatus,
+    ContentExtractionStatus,
+    ContentLocatorKind,
 )
 
 
@@ -221,6 +223,45 @@ class ContextPackPlacement:
     section_id: str
     ordinal: int
     created_at: datetime
+
+
+@dataclass(slots=True, kw_only=True)
+class ExtractionRun:
+    id: str
+    project_id: str
+    context_revision_id: str
+    input_sha256: str
+    extractor_name: str
+    extractor_version: str
+    config_sha256: str
+    status: ContentExtractionStatus
+    actor: str
+    correlation_id: str
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+    element_count: int = 0
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+@dataclass(slots=True, kw_only=True)
+class ContentDocument:
+    id: str
+    project_id: str
+    extraction_run_id: str
+    context_revision_id: str
+    created_at: datetime
+
+
+@dataclass(slots=True, kw_only=True)
+class ContentElement:
+    id: str
+    project_id: str
+    document_id: str
+    ordinal: int
+    text: str
+    locator_kind: ContentLocatorKind
+    locator_value: str
 
 
 @dataclass(slots=True, kw_only=True)

@@ -21,7 +21,7 @@ from pig.domain.model_version import (
 )
 
 
-PROJECT_CONTEXT_SCHEMA_REVISION = "0013_context_pack_events"
+PROJECT_CONTEXT_SCHEMA_REVISION = "0017_workspace_rename_event"
 PROJECT_CONTEXT_FOUNDATION_SCHEMA_REVISION = "0009_project_context_foundation"
 PROJECT_CONTEXT_CAPTURE_SCHEMA_REVISION = "0010_context_capture_core"
 DEFAULT_CONTEXT_SOFT_QUOTA_BYTES = 10 * 1024**3
@@ -230,6 +230,11 @@ class ProjectContextUpgradeService:
             "0008_workbench_recovery",
             PROJECT_CONTEXT_FOUNDATION_SCHEMA_REVISION,
             PROJECT_CONTEXT_CAPTURE_SCHEMA_REVISION,
+            "0011_context_actions",
+            "0012_context_pack_contract",
+            "0013_context_pack_events",
+            "0014_content_search",
+            "0015_project_experience",
             PROJECT_CONTEXT_SCHEMA_REVISION,
         }
         if allow_current:
@@ -251,7 +256,7 @@ class ProjectContextUpgradeService:
             )
         if (
             inspection.model_version == PROJECT_CONTEXT_MODEL_VERSION
-            and inspection.schema_revision != PROJECT_CONTEXT_SCHEMA_REVISION
+            and inspection.schema_revision in {"0008_workbench_recovery"}
         ):
             raise ApplicationError(
                 "PROJECT_MODEL_SCHEMA_MISMATCH",

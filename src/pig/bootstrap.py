@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import platform
+import sys
 from typing import Callable
 from uuid import uuid4
 
@@ -24,6 +25,7 @@ from pig.application.context_action_service import ContextActionService
 from pig.application.context_query_service import ContextQueryService
 from pig.application.context_pack_plan_service import ContextPackPlanService
 from pig.application.context_pack_export_service import ContextPackExportService
+from pig.application.content_service import ContentService
 from pig.infrastructure.filesystem.context_pack_store import LocalContextPackStore
 from pig.infrastructure.database.provider import SqlAlchemyProjectDatabase
 from pig.infrastructure.database.project_upgrade import SqliteProjectUpgradeStore
@@ -65,6 +67,12 @@ from pig.handlers.workbench import (
 )
 
 
+_SYNTHETIC_DEEPSEEK_PROJECT_ID = "71a5c1de-822d-4b93-a522-9091dbc780d9"
+_SYNTHETIC_DEEPSEEK_FINGERPRINT = (
+    "acfc8dc0efbbb84ea4af72cf91b566366aab2a2584e4426263b0ac4774f81ecd"
+)
+
+
 def create_local_application(
     workspace_root: Path,
     *,
@@ -74,6 +82,7 @@ def create_local_application(
     catalog_policy: CatalogPolicy = CatalogPolicy(),
     open_policy: OpenPolicy = OpenPolicy(),
     file_opener: FileOpener | None = None,
+    synthetic_deepseek_qualification: bool = False,
 ) -> PigApplication:
     """Composition root for the local-filesystem, one-SQLite-per-Project runtime."""
 
@@ -194,7 +203,10 @@ def create_local_application(
         clock=effective_clock,
         id_generator=effective_id_generator,
     )
-    workspace_query_service = WorkspaceQueryService(database=database)
+    workspace_query_service = WorkspaceQueryService(
+        database=database, originals=original_snapshot_store,
+        working_store=working_store,
+    )
     workspace_export_service = WorkspaceExportService(
         database=database,
         originals=original_snapshot_store,
@@ -236,6 +248,32 @@ def create_local_application(
     )
     context_query_service = ContextQueryService(database=database)
     context_pack_plan_service = ContextPackPlanService(database=database)
+    from pig.application.experience_service import ExperienceService
+    from pig.application.ai_analysis_service import AIAnalysisService, AllowedLivePlan
+    from pig.infrastructure.ai.credentials import WindowsCredentialStore
+    from pig.infrastructure.ai.responses import ResponsesAdapter
+    approved_database = (
+        Path(__file__).resolve().parents[2] / "acceptance"
+        / "v24-provider-qualification-20261016" / "projects"
+        / "Synthetic Provider Qualification Run2" / "project.sqlite"
+    )
+    source_qualification = (
+        synthetic_deepseek_qualification
+        and not getattr(sys, "frozen", False)
+        and approved_database.is_file()
+    )
+    ai_adapters = (
+        {"deepseek": ResponsesAdapter(provider="deepseek")}
+        if source_qualification else
+        {"openai": ResponsesAdapter(provider="openai"),
+         "deepseek": ResponsesAdapter(provider="deepseek")}
+    )
+    ai_scopes = (
+        (AllowedLivePlan(_SYNTHETIC_DEEPSEEK_PROJECT_ID,
+                         approved_database.resolve(),
+                         _SYNTHETIC_DEEPSEEK_FINGERPRINT),)
+        if source_qualification else None
+    )
     return PigApplication(
         workspace=LocalWorkspaceManager(workspace_root),
         database=database,
@@ -257,10 +295,27 @@ def create_local_application(
         context_action_service=context_action_service,
         context_query_service=context_query_service,
         context_pack_plan_service=context_pack_plan_service,
+        experience_service=ExperienceService(
+            database=database, clock=effective_clock, id_generator=effective_id_generator,
+        ),
+        ai_analysis_service=AIAnalysisService(
+            database=database,
+            adapters=ai_adapters,
+            credential_store=WindowsCredentialStore(),
+            # Source desktop only; one exact synthetic input is approved.
+            # Packaged desktop and every other Project remain outbound-disabled.
+            live_enabled=source_qualification,
+            allowed_live_plans=ai_scopes,
+            clock=effective_clock, id_generator=effective_id_generator,
+        ),
         context_pack_export_service=ContextPackExportService(
             database=database, plan_service=context_pack_plan_service,
             store=LocalContextPackStore(), clock=effective_clock,
             id_generator=effective_id_generator,
+        ),
+        content_service=ContentService(
+            database=database, object_store=context_object_store, opener=effective_opener,
+            clock=effective_clock, id_generator=effective_id_generator,
         ),
         clock=effective_clock,
         id_generator=effective_id_generator,

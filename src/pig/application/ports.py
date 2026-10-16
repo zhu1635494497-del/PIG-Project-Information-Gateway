@@ -208,6 +208,8 @@ class WorkingVersionPair:
 
 
 class WorkingArtifactStore(Protocol):
+    def display_path(self, project_path: Path, storage_key: str) -> Optional[Path]: ...
+
     def materialize(
         self,
         project_path: Path,

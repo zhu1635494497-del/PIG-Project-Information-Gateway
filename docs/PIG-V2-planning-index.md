@@ -1,101 +1,60 @@
-# PIG V2 当前规划索引 / PIG V2 Active Planning Index
+# PIG V2 规划索引 / PIG V2 Planning Index
 
-- 状态：当前有效 / Status: Active
-- 日期：2026-10-08 / Date: 2026-10-08
-- 当前阶段：V2.2 Context Pack 实施与验收 / Current phase: V2.2 Context Pack implementation and acceptance
-- 代码授权：D120-A 至 D126-A 已批准；V2.2.2–V2.2.4 获一次性授权 / Code authorization: D120-A through D126-A approved; V2.2.2–V2.2.4 authorized together
+本文件只维护 V2 读取路径。当前阶段、授权、未签收项与下一步停止线以
+[CURRENT_SCOPE](project-rules/CURRENT_SCOPE.md) 为准；不在这里复制第二份状态。
 
-## 有效 V2 文档 / Active V2 documents
+This file maintains V2 reading paths. Phase, authorization, unaccepted items, and the active
+stop line follow [CURRENT_SCOPE](project-rules/CURRENT_SCOPE.md), without a duplicated status record.
 
-1. `docs/decisions/ADR-024-v2-project-context-foundation.md`
-2. `docs/decisions/ADR-025-v2.1-context-foundation-decisions.md`
-3. `docs/decisions/ADR-026-v2.2-context-pack.md`
-4. `docs/application/PIG-V2-scope.md`
-5. `docs/domain/PIG-V2-project-context-domain-model.md`
-6. `docs/domain/PIG-V2-state-machines-and-invariants.md`
-7. `docs/application/PIG-V2.1-context-foundation.md`
-8. `docs/application/PIG-V2.1.1-upgrade-schema.md`
-9. `docs/application/PIG-V2-milestones.md`
-10. `docs/application/PIG-V2.1.2-capture-core.md`
-11. `docs/application/PIG-V2.1.3-context-actions.md`
-12. `docs/application/PIG-V2.1.4-minimum-ui-plan.md`
-13. `docs/application/PIG-V2.1.5-acceptance.md`
-14. `docs/application/PIG-V2.2-decision-gate.md`（已批准决策背景 / approved decision background）
-15. `docs/application/PIG-V2.2.1-contract-schema.md`
-16. `docs/application/PIG-V2.2-implementation-acceptance.md`
+## 1. 总入口 / Entry points
 
-跨版本优先级由 `docs/PIG-planning-index.md` 定义。V1 详细实现历史由
-`docs/PIG-V1-planning-index.md` 保留。
+- [主规则](../PIG%20Project%20Rules.md) / Main rules.
+- [跨版本规划索引](PIG-planning-index.md) / Cross-version planning index.
+- [V1 决策与实现历史](PIG-V1-planning-index.md) / V1 decisions and implementation history.
 
-Cross-version priority is defined by `docs/PIG-planning-index.md`. Detailed V1
-implementation history remains in `docs/PIG-V1-planning-index.md`.
+## 2. V2 决策与范围 / V2 decisions and scope
 
-## 已批准基础决策 / Approved foundation decisions
+- [ADR-024](decisions/ADR-024-v2-project-context-foundation.md)：D101–D112 基础决定 / Foundation decisions.
+- [ADR-025](decisions/ADR-025-v2.1-context-foundation-decisions.md)：D113–D119 Context 决定 / Context decisions.
+- [ADR-026](decisions/ADR-026-v2.2-context-pack.md)：D120–D126 Pack 决定 / Pack decisions.
+- [ADR-027](decisions/ADR-027-v2.3-canonical-content-search.md)：D127–D132 内容与搜索决定 / Content and search decisions.
+- [V2 Scope](application/PIG-V2-scope.md).
+- [V2 Domain](domain/PIG-V2-project-context-domain-model.md).
+- [V2 States / Invariants](domain/PIG-V2-state-machines-and-invariants.md).
+- [V2 Milestones](application/PIG-V2-milestones.md).
 
-- D101-A：V1 Workbench 是 V2 稳定底座；
-  V1 Workbench remains the stable V2 foundation.
-- D102-A：Project Context 先于知识库和 RAG；
-  Project Context precedes knowledge bases and RAG.
-- D103-A：核心文件使用不可变 Context Revision；
-  core files use immutable Context Revisions.
-- D104-A：Context Item 与多 Section Placement 分离；
-  Context Items are separate from multiple Section placements.
-- D105-A：先完成人工 Context 与 Context Pack；
-  human Context and Context Pack come before AI.
-- D106-A：PIG Canonical Content 加可替换 Extractor；
-  PIG Canonical Content uses replaceable extractors.
-- D107-A：SQLite FTS5 优先，Vector 由评测证据驱动；
-  SQLite FTS5 comes first and vectors require evaluation evidence.
-- D108-A：AI 是选定 Revision 范围内、有 Citation 的 Typed Action；
-  AI is a cited typed action over selected Revisions.
-- D109-A：只预留平台无关交付边界；
-  reserve only a vendor-neutral delivery boundary.
-- D110-A：当前 V1 Workbench Project 使用前向 Migration；
-  current V1 Workbench Projects use forward migrations.
-- D111-A：耗时任务后台、有界、可取消；
-  expensive work is bounded, background, and cancellable.
-- D112-A：开源组件通过 Adapter 复用，不 Fork 完整平台；
-  reuse open-source components through adapters rather than forking a platform.
+## 3. 阶段文档 / Milestone documents
 
-## 已批准 V2.1 决策 / Approved V2.1 decisions
+V2.1 与 V2.2 的完整实施、验收文档见[跨版本索引](PIG-planning-index.md)。
+V2.3 的原始选择见[V2.3 决策门](application/PIG-V2.3-decision-gate.md)，
+当前授权与停止线以 CURRENT_SCOPE 为准。
 
-- D113-A：每个 Project 使用内容寻址 Context Object Store；
-  each Project uses a content-addressed Context Object Store.
-- D114-B：默认保留当前和上一 Revision，并保护被引用或人工保护的 Revision；
-  retain current and previous Revisions by default and protect referenced or
-  manually protected Revisions.
-- D115-A：当前 V1 Project 经确认、备份和校验后原地前向升级；
-  current V1 Projects use a confirmed, backed-up, validated in-place forward upgrade.
-- D116-A：V2.1 只支持扁平有序 Section，软删除后使用虚拟 `Unsectioned`；
-  V2.1 uses flat ordered Sections with soft deletion and virtual `Unsectioned`.
-- D117-A：同窗口 `[Workspace] [Project Context]` 和最小三栏 Context UI；
-  same-window `[Workspace] [Project Context]` with a minimum three-pane Context UI.
-- D118-B：Materialized Item 捕获 Working，Virtual Item 直接从 Source 捕获；
-  materialized Items capture Working bytes and virtual Items capture directly from Source.
-- D119-B：Project 使用独立 `context_revision` 乐观并发版本；
-  Projects use an independent `context_revision` optimistic-concurrency version.
+The [cross-version index](PIG-planning-index.md) lists V2.1/V2.2 implementation and acceptance
+documents. The [V2.3 gate](application/PIG-V2.3-decision-gate.md) preserves the original
+choices; current authorization and stop lines follow CURRENT_SCOPE.
 
-## 当前授权门 / Current authorization gate
+[V2.3 实施与验收](application/PIG-V2.3-implementation-acceptance.md)记录代码、测试与人工停止线。
 
-V2.1.5 已通过本轮验收；旧 V1 数据库适配未签收。D120-A 至 D126-A 已批准，
-用户明确授权一次性完成 V2.2.2–V2.2.4。现有 D115-A 实现不因本轮范围缩小而删除。
+[V2.3 implementation and acceptance](application/PIG-V2.3-implementation-acceptance.md)
+records implementation evidence, tests, and remaining manual gates.
 
-V2.1.5 passed this acceptance run; old V1 database adaptation remains
-unaccepted. D120-A through D126-A are approved and the user explicitly
-authorized V2.2.2–V2.2.4 together. Existing D115-A implementation is not removed.
+[V2.3 复杂格式评估](application/PIG-V2.3-complex-format-evaluation.md)保留 D128-A 的
+Fixture、许可证、定位、性能与打包证据门。
 
-Docling、其他解析器、模型 Provider、Embedding、Vector Store、RAG Framework、平台
-Adapter、MCP、Agent 和 Automation 均未获得实现授权。
+[V2.3 complex-format evaluation](application/PIG-V2.3-complex-format-evaluation.md)
+preserves the D128-A fixture, licensing, locator, performance, and packaging gate.
 
-Docling, other parsers, model providers, embeddings, vector stores, RAG
-frameworks, platform adapters, MCP, Agents, and Automation are not authorized
-for implementation.
+[V2.4 决策门](application/PIG-V2.4-decision-gate.md)保留 D133–D142 的方案对照；
+[ADR-028](decisions/ADR-028-v2.4-project-experience-controlled-ai.md)记录已批准的 A 方案，
+[V2.4.1 契约](application/PIG-V2.4.1-experience-contract.md)记录首段实施边界。
+[ADR-029](decisions/ADR-029-v2.4-provider-and-budget-gate.md)记录 D143–D146，
+[实施验收](application/PIG-V2.4-implementation-acceptance.md)记录源码与剩余 Gate。
+阶段与验收仍以 CURRENT_SCOPE 为准。
 
-## 下一步建议 / Next minimum recommendation
-
-完成 V2.2 合成数据自动验收后，请用户决定是否进行真实资料与异机人工验收。
-当前授权不得解释为 V2.3、Docling、内容提取、模型接入或平台适配授权。
-
-After synthetic automated V2.2 acceptance, the user decides whether to perform
-real-data and cross-machine manual acceptance. Current authorization does not
-include V2.3, Docling, content extraction, models, or platform adapters.
+The [V2.4 decision gate](application/PIG-V2.4-decision-gate.md) preserves the D133–D142
+alternatives; [ADR-028](decisions/ADR-028-v2.4-project-experience-controlled-ai.md) records
+the accepted A choices, and the [V2.4.1 contract](application/PIG-V2.4.1-experience-contract.md)
+defines the first implementation boundary. Phase and acceptance still follow CURRENT_SCOPE.
+[ADR-029](decisions/ADR-029-v2.4-provider-and-budget-gate.md) records D143–D146;
+[implementation/acceptance](application/PIG-V2.4-implementation-acceptance.md) tracks
+source behavior and remaining gates.

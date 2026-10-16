@@ -141,7 +141,9 @@ class WorkspaceExportService:
                 export_directories = ()
             elif (
                 len(selected) == 1
-                and selected[0].item.item_kind == WorkspaceItemKind.FOLDER
+                and selected[0].item.item_kind in {
+                    WorkspaceItemKind.FOLDER, WorkspaceItemKind.CONTAINER_VIEW,
+                }
             ):
                 export_kind = WorkspaceExportKind.DIRECTORY
                 directory_root_id = selected[0].item.id
@@ -162,11 +164,6 @@ class WorkspaceExportService:
                 expanded = []
                 seen: set[str] = set()
                 for value in selected:
-                    if value.item.item_kind == WorkspaceItemKind.CONTAINER_VIEW:
-                        raise ApplicationError(
-                            "EXPORT_ITEM_DENIED",
-                            "select an ordinary folder or terminal files for export",
-                        )
                     candidates = (
                         (value,)
                         if value.item.item_kind == WorkspaceItemKind.FILE

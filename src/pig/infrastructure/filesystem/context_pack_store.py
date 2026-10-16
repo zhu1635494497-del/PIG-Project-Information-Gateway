@@ -206,7 +206,7 @@ class LocalContextPackStore:
     @staticmethod
     def _relative(value: str) -> None:
         path = PurePosixPath(value)
-        if (path.is_absolute() or len(path.parts) != 3 or path.parts[0] != "files"
+        if (path.is_absolute() or len(path.parts) != 2 or path.parts[0] != "files"
                 or any(part in ("", ".", "..") or "\\" in part or ":" in part for part in path.parts)):
             raise ApplicationError("CONTEXT_PACK_PATH_INVALID", "unsafe relative pack path")
 

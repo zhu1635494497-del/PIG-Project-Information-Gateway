@@ -49,6 +49,8 @@ from pig.application.contracts import (
     GetRecentProjectEventsResult,
     GetWorkspaceItemRequest,
     GetWorkspaceItemResult,
+    GetWorkspacePhysicalLocationRequest,
+    GetWorkspacePhysicalLocationResult,
     GetWorkspaceTreeRequest,
     GetWorkspaceTreeResult,
     GetProjectTreeRequest,
@@ -79,6 +81,7 @@ from pig.application.contracts import (
     MaterializeWorkspaceItemRequest,
     MaterializeWorkspaceItemResult,
     MoveWorkspaceItemRequest,
+    RenameWorkspaceItemRequest,
     NodeDetails,
     OpenNodeRequest,
     OpenNodeResult,
@@ -120,6 +123,13 @@ from pig.application.contracts import (
     WorkspaceMutationResult,
 )
 from pig.application.errors import ApplicationError
+from pig.application.content_contracts import (
+    ExtractContextRevisionsRequest, ExtractContextRevisionsResult,
+    SearchContextContentRequest, SearchContextContentResult,
+    RebuildContextIndexRequest, RebuildContextIndexResult,
+    OpenContextRevisionRequest, OpenContextRevisionResult,
+    RecoverInterruptedContentRequest, RecoverInterruptedContentResult,
+)
 from pig.application.operation_control import OperationControl, ensure_operation_control
 from pig.application.manifest import (
     MANIFEST_SCHEMA_VERSION,
@@ -213,6 +223,9 @@ class PigApplication:
         context_query_service: Optional["ContextQueryService"] = None,
         context_pack_plan_service: Optional["ContextPackPlanService"] = None,
         context_pack_export_service: Optional["ContextPackExportService"] = None,
+        experience_service=None,
+        ai_analysis_service=None,
+        content_service=None,
         clock: Clock = _utc_now,
         id_generator: IdGenerator = _new_id,
     ) -> None:
@@ -239,6 +252,133 @@ class PigApplication:
         self._context_query_service = context_query_service
         self._context_pack_plan_service = context_pack_plan_service
         self._context_pack_export_service = context_pack_export_service
+        self._experience_service = experience_service
+        self._ai_analysis_service = ai_analysis_service
+        self._content_service = content_service
+
+    def get_analysis_models(self):
+        return self._ai_analysis().profiles()
+
+    def ai_live_enabled(self) -> bool:
+        return self._ai_analysis().live_enabled
+
+    def can_execute_ai_analysis(self, plan) -> bool:
+        return self._ai_analysis().can_execute(plan)
+
+    def plan_ai_analysis(self, request):
+        return self._ai_analysis().plan(request)
+
+    def execute_ai_analysis(self, plan, *, actor: str, confirmed_token: str):
+        self._assert_writable(plan.request.project_id, plan.request.database_path)
+        return self._ai_analysis().execute(plan, actor=actor,
+                                           confirmed_token=confirmed_token)
+
+    def get_ai_analysis(self, project_id: str, database_path: Path, run_id: str):
+        return self._ai_analysis().get(project_id, database_path, run_id)
+
+    def list_ai_analyses(self, project_id: str, database_path: Path):
+        return self._ai_analysis().list(project_id, database_path)
+
+    def recover_interrupted_ai_analyses(self, project_id: str, database_path: Path,
+                                        *, actor: str):
+        self._assert_writable(project_id, database_path)
+        return self._ai_analysis().recover_interrupted(project_id, database_path,
+                                                       actor=actor)
+
+    def save_ai_credential(self, provider: str, secret: str):
+        return self._ai_analysis().save_credential(provider, secret)
+
+    def remove_ai_credential(self, provider: str):
+        return self._ai_analysis().remove_credential(provider)
+
+    def _ai_analysis(self):
+        if self._ai_analysis_service is None:
+            raise ApplicationError("AI_NOT_CONFIGURED", "AI analysis is not configured")
+        return self._ai_analysis_service
+
+    def create_experience(self, request):
+        self._assert_writable(request.project_id, request.database_path)
+        return self._experiences().create(request)
+
+    def correct_experience(self, request):
+        self._assert_writable(request.project_id, request.database_path)
+        return self._experiences().correct(request)
+
+    def confirm_experience(self, request):
+        self._assert_writable(request.project_id, request.database_path)
+        return self._experiences().confirm(request)
+
+    def supersede_experience(self, request):
+        self._assert_writable(request.project_id, request.database_path)
+        return self._experiences().supersede(request)
+
+    def get_experience(self, *, project_id: str, database_path: Path, record_id: str):
+        return self._experiences().get(project_id=project_id, database_path=database_path,
+                                       record_id=record_id)
+
+    def list_experiences(self, *, project_id: str, database_path: Path,
+                         status=None, limit: int = 50, offset: int = 0):
+        return self._experiences().list(project_id=project_id, database_path=database_path,
+                                        status=status, limit=limit, offset=offset)
+
+    def list_experience_summaries(self, *, project_id: str, database_path: Path,
+                                  limit: int = 50, offset: int = 0):
+        return self._experiences().list_summaries(project_id=project_id,
+                                                  database_path=database_path,
+                                                  limit=limit, offset=offset)
+
+    def list_observed_experience_events(self, *, project_id: str, database_path: Path,
+                                        limit: int = 50):
+        return self._experiences().list_observed_events(project_id=project_id,
+                                                         database_path=database_path,
+                                                         limit=limit)
+
+    def _experiences(self):
+        if self._experience_service is None:
+            raise ApplicationError("EXPERIENCE_NOT_CONFIGURED", "experience is not configured")
+        return self._experience_service
+
+    def extract_context_revisions(
+        self, request: ExtractContextRevisionsRequest, *, control: OperationControl | None = None
+    ) -> ExtractContextRevisionsResult:
+        self._assert_writable(request.project_id, request.database_path)
+        if self._content_service is None:
+            raise ApplicationError("CONTENT_NOT_CONFIGURED", "content extraction is not configured")
+        return self._content_service.extract(request, control=control)
+
+    def search_context_content(self, request: SearchContextContentRequest) -> SearchContextContentResult:
+        if self._content_service is None:
+            raise ApplicationError("CONTENT_NOT_CONFIGURED", "content search is not configured")
+        return self._content_service.search(request)
+
+    def rebuild_context_index(self, request: RebuildContextIndexRequest) -> RebuildContextIndexResult:
+        self._assert_writable(request.project_id, request.database_path)
+        if self._content_service is None:
+            raise ApplicationError("CONTENT_NOT_CONFIGURED", "content search is not configured")
+        return self._content_service.rebuild_index(request)
+
+    def open_context_revision(self, request: OpenContextRevisionRequest) -> OpenContextRevisionResult:
+        if self._content_service is None:
+            raise ApplicationError("CONTENT_NOT_CONFIGURED", "content search is not configured")
+        return self._content_service.open_revision(request)
+
+    def get_content_extraction_runs(self, project_id: str, database_path: Path,
+                                    revision_id: str):
+        if self._content_service is None:
+            raise ApplicationError("CONTENT_NOT_CONFIGURED", "content search is not configured")
+        return self._content_service.runs_for_revision(project_id, database_path, revision_id)
+
+    def get_content_item_runs(self, project_id: str, database_path: Path,
+                              context_item_id: str):
+        if self._content_service is None:
+            raise ApplicationError("CONTENT_NOT_CONFIGURED", "content search is not configured")
+        return self._content_service.runs_for_item(project_id, database_path, context_item_id)
+
+    def recover_interrupted_content(self, request: RecoverInterruptedContentRequest) -> RecoverInterruptedContentResult:
+        self._assert_writable(request.project_id, request.database_path)
+        if self._content_service is None:
+            raise ApplicationError("CONTENT_NOT_CONFIGURED", "content extraction is not configured")
+        return self._content_service.recover_interrupted(request)
 
     def capture_context_revision(
         self,
@@ -492,6 +632,11 @@ class PigApplication:
     ) -> GetWorkspaceItemResult:
         return self._workspace_queries().item(request)
 
+    def get_workspace_physical_location(
+        self, request: GetWorkspacePhysicalLocationRequest
+    ) -> GetWorkspacePhysicalLocationResult:
+        return self._workspace_queries().physical_location(request)
+
     def search_workspace_items(
         self, request: SearchWorkspaceItemsRequest
     ) -> SearchWorkspaceItemsResult:
@@ -544,6 +689,12 @@ class PigApplication:
     ) -> WorkspaceMutationResult:
         self._assert_writable(request.project_id, request.database_path)
         return self._workspace_actions().move(request)
+
+    def rename_workspace_item(
+        self, request: RenameWorkspaceItemRequest
+    ) -> WorkspaceMutationResult:
+        self._assert_writable(request.project_id, request.database_path)
+        return self._workspace_actions().rename(request)
 
     def soft_delete_workspace_item(
         self, request: SoftDeleteWorkspaceItemRequest
@@ -1423,6 +1574,8 @@ class WorkspaceActionService(Protocol):
     ) -> WorkspaceMutationResult: ...
 
     def move(self, request: MoveWorkspaceItemRequest) -> WorkspaceMutationResult: ...
+
+    def rename(self, request: RenameWorkspaceItemRequest) -> WorkspaceMutationResult: ...
 
     def soft_delete(
         self, request: SoftDeleteWorkspaceItemRequest

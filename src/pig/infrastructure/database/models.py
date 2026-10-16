@@ -12,6 +12,7 @@ from sqlalchemy import (
     Index,
     Integer,
     JSON,
+    Numeric,
     PrimaryKeyConstraint,
     String,
     Text,
@@ -22,6 +23,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from pig.domain import enums
 from pig.domain.enums import StringEnum
+from pig.domain.experience_policy import ExperienceEvidenceRole, ExperienceKind, ExperienceStatus
+from pig.domain.ai_policy import AnalysisAction, AnalysisStatus
 from pig.infrastructure.database.base import Base
 from pig.infrastructure.database.types import UTCDateTime
 
@@ -359,6 +362,86 @@ class ContextRevisionModel(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class ExtractionRunModel(Base):
+    __tablename__ = "extraction_runs"
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_extraction_runs_id_project"),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["context_revision_id", "project_id"],
+            ["context_revisions.id", "context_revisions.project_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("element_count >= 0", name="element_count_nonnegative"),
+        Index("ix_extraction_runs_revision_status", "project_id", "context_revision_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    context_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    input_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    extractor_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    extractor_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[enums.ContentExtractionStatus] = mapped_column(
+        enum_type(enums.ContentExtractionStatus, "content_extraction_status"), nullable=False
+    )
+    actor: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime())
+    element_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[Optional[str]] = mapped_column(String(64))
+    error_message: Mapped[Optional[str]] = mapped_column(String(512))
+
+
+class ContentDocumentModel(Base):
+    __tablename__ = "content_documents"
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_content_documents_id_project"),
+        UniqueConstraint("extraction_run_id", name="uq_content_documents_run"),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["extraction_run_id", "project_id"],
+            ["extraction_runs.id", "extraction_runs.project_id"], ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["context_revision_id", "project_id"],
+            ["context_revisions.id", "context_revisions.project_id"], ondelete="CASCADE",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    extraction_run_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    context_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ContentElementModel(Base):
+    __tablename__ = "content_elements"
+    __table_args__ = (
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["document_id", "project_id"],
+            ["content_documents.id", "content_documents.project_id"], ondelete="CASCADE",
+        ),
+        UniqueConstraint("document_id", "ordinal", name="uq_content_elements_ordinal"),
+        CheckConstraint("ordinal >= 0", name="ordinal_nonnegative"),
+        CheckConstraint("length(text) > 0", name="text_not_empty"),
+        CheckConstraint("length(locator_value) > 0", name="locator_not_empty"),
+        Index("ix_content_elements_document_order", "document_id", "ordinal"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    document_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    locator_kind: Mapped[enums.ContentLocatorKind] = mapped_column(
+        enum_type(enums.ContentLocatorKind, "content_locator_kind"), nullable=False
+    )
+    locator_value: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
 class ContextAnnotationModel(Base):
     __tablename__ = "context_annotations"
     __table_args__ = (
@@ -400,6 +483,103 @@ class ContextAnnotationModel(Base):
     author: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ExperienceRecordModel(Base):
+    __tablename__ = "experience_records"
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_experience_records_id_project"),
+        CheckConstraint("current_version >= 1", name="current_version_positive"),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+        Index("ix_experience_records_project_updated", "project_id", "updated_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    kind: Mapped[ExperienceKind] = mapped_column(enum_type(ExperienceKind, "experience_kind"), nullable=False)
+    status: Mapped[ExperienceStatus] = mapped_column(enum_type(ExperienceStatus, "experience_status"), nullable=False)
+    current_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ExperienceVersionModel(Base):
+    __tablename__ = "experience_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint("record_id", "version"),
+        UniqueConstraint("record_id", "project_id", "version", name="uq_experience_versions_identity"),
+        CheckConstraint("version >= 1 AND length(trim(title)) > 0 AND length(trim(body)) > 0 "
+                        "AND length(trim(author)) > 0", name="content_valid"),
+        ForeignKeyConstraint(["record_id", "project_id"],
+                             ["experience_records.id", "experience_records.project_id"], ondelete="RESTRICT"),
+    )
+
+    record_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str] = mapped_column(String(255), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ExperienceStateChangeModel(Base):
+    __tablename__ = "experience_state_changes"
+    __table_args__ = (
+        ForeignKeyConstraint(["record_id", "project_id", "version"],
+                             ["experience_versions.record_id", "experience_versions.project_id",
+                              "experience_versions.version"], ondelete="RESTRICT"),
+        CheckConstraint("length(trim(actor)) > 0", name="actor_not_blank"),
+        Index("ix_experience_state_changes_record", "record_id", "occurred_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    record_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    from_status: Mapped[Optional[str]] = mapped_column(String(16))
+    to_status: Mapped[ExperienceStatus] = mapped_column(enum_type(ExperienceStatus, "experience_status"), nullable=False)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ExperienceRevisionLinkModel(Base):
+    __tablename__ = "experience_revision_links"
+    __table_args__ = (
+        PrimaryKeyConstraint("record_id", "version", "context_revision_id"),
+        ForeignKeyConstraint(["record_id", "project_id", "version"],
+                             ["experience_versions.record_id", "experience_versions.project_id",
+                              "experience_versions.version"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["context_revision_id", "project_id", "context_item_id"],
+                             ["context_revisions.id", "context_revisions.project_id",
+                              "context_revisions.context_item_id"], ondelete="RESTRICT"),
+        Index("ix_experience_revision_links_revision", "project_id", "context_revision_id"),
+    )
+
+    record_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    context_item_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    context_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    role: Mapped[ExperienceEvidenceRole] = mapped_column(
+        enum_type(ExperienceEvidenceRole, "experience_evidence_role"), nullable=False)
+
+
+class ExperienceEventLinkModel(Base):
+    __tablename__ = "experience_event_links"
+    __table_args__ = (
+        PrimaryKeyConstraint("record_id", "version", "event_id"),
+        ForeignKeyConstraint(["record_id", "project_id", "version"],
+                             ["experience_versions.record_id", "experience_versions.project_id",
+                              "experience_versions.version"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["event_id", "project_id"],
+                             ["processing_events.id", "processing_events.project_id"], ondelete="RESTRICT"),
+    )
+
+    record_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_id: Mapped[str] = mapped_column(String(36), nullable=False)
 
 
 class ContextPackExportModel(Base):
@@ -1673,3 +1853,83 @@ class ProcessingEventModel(Base):
     )
     details: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     correlation_id: Mapped[str] = mapped_column(String(36), nullable=False)
+
+
+class AIAnalysisRunModel(Base):
+    __tablename__ = "ai_analysis_runs"
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_ai_runs_identity"),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="RESTRICT"),
+        CheckConstraint("coverage IN ('COMPLETE_INPUT','PARTIAL_INPUT')", name="coverage_valid"),
+        CheckConstraint("estimated_max_usd >= 0", name="estimate_nonnegative"),
+        CheckConstraint("workspace_revision_at_plan >= 0", name="workspace_revision_nonnegative"),
+        Index("ix_ai_runs_project_started", "project_id", "started_at", "id"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    action: Mapped[AnalysisAction] = mapped_column(enum_type(AnalysisAction, "ai_action"), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(80), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    workspace_revision_at_plan: Mapped[int] = mapped_column(Integer, nullable=False)
+    coverage: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[AnalysisStatus] = mapped_column(enum_type(AnalysisStatus, "ai_run_status"), nullable=False)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False)
+    consented_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime())
+    estimated_max_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False)
+    input_tokens: Mapped[Optional[int]] = mapped_column(Integer)
+    output_tokens: Mapped[Optional[int]] = mapped_column(Integer)
+    error_code: Mapped[Optional[str]] = mapped_column(String(80))
+
+
+class AIAnalysisInputModel(Base):
+    __tablename__ = "ai_analysis_inputs"
+    __table_args__ = (
+        PrimaryKeyConstraint("run_id", "element_id"),
+        ForeignKeyConstraint(["run_id", "project_id"],
+                             ["ai_analysis_runs.id", "ai_analysis_runs.project_id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["element_id"], ["content_elements.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["context_revision_id", "project_id"],
+                             ["context_revisions.id", "context_revisions.project_id"], ondelete="RESTRICT"),
+        UniqueConstraint("run_id", "ordinal", name="uq_ai_inputs_order"),
+        Index("ix_ai_inputs_revision", "project_id", "context_revision_id"),
+    )
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    element_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    context_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    locator_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    locator_value: Mapped[str] = mapped_column(String(255), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class AIAnalysisClaimModel(Base):
+    __tablename__ = "ai_analysis_claims"
+    __table_args__ = (
+        PrimaryKeyConstraint("run_id", "ordinal"),
+        ForeignKeyConstraint(["run_id"], ["ai_analysis_runs.id"], ondelete="RESTRICT"),
+        CheckConstraint("ordinal >= 0 AND length(trim(text)) > 0", name="claim_valid"),
+    )
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    subject: Mapped[Optional[str]] = mapped_column(String(200))
+    time: Mapped[Optional[str]] = mapped_column(String(200))
+
+
+class AIAnalysisCitationModel(Base):
+    __tablename__ = "ai_analysis_citations"
+    __table_args__ = (
+        PrimaryKeyConstraint("run_id", "claim_ordinal", "element_id"),
+        ForeignKeyConstraint(["run_id", "claim_ordinal"],
+                             ["ai_analysis_claims.run_id", "ai_analysis_claims.ordinal"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["run_id", "element_id"],
+                             ["ai_analysis_inputs.run_id", "ai_analysis_inputs.element_id"], ondelete="RESTRICT"),
+    )
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    claim_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    element_id: Mapped[str] = mapped_column(String(36), nullable=False)

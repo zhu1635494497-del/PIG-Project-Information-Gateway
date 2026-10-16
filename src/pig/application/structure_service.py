@@ -1104,7 +1104,7 @@ class WorkbenchStructureService:
             if (
                 item is None
                 or item.project_id != project_id
-                or item.item_kind != WorkspaceItemKind.FILE
+                or item.item_kind not in (WorkspaceItemKind.FILE, WorkspaceItemKind.CONTAINER_VIEW)
                 or item.origin_source_node_id is None
                 or not uow.workspace.is_effectively_active(item.id)
             ):
@@ -1120,6 +1120,9 @@ class WorkbenchStructureService:
                     "CONTEXT_CAPTURE_SOURCE_UNREADABLE",
                     "source node is not a successful terminal file",
                 )
+            if item.item_kind == WorkspaceItemKind.CONTAINER_VIEW and node.format != NodeFormat.EML:
+                raise ApplicationError("CONTEXT_CAPTURE_SOURCE_UNREADABLE",
+                                       "only EML container views can be captured")
             source = uow.catalog.get_source(node.source_id)
             if source is None or source.root_node_id is None:
                 raise ApplicationError(ErrorCode.INTERNAL_ERROR.value, "source root is missing")
