@@ -34,6 +34,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument("--content-worker", nargs=4, help=argparse.SUPPRESS)
     parser.add_argument(
         "--acceptance-smoke-test",
         type=Path,
@@ -61,6 +62,9 @@ def _configure_logging(application_data: Path) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.content_worker is not None:
+        from pig.infrastructure.content.worker import main as content_worker_main
+        return content_worker_main(["content-worker", *args.content_worker])
     if args.runtime_smoke_test or args.acceptance_smoke_test is not None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     qt = QApplication(sys.argv[:1])
@@ -96,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         create_local_application(
             workspace_root,
             seven_zip_executable=seven_zip,
+            synthetic_deepseek_qualification=not getattr(sys, "frozen", False),
         ),
         actor=getpass.getuser() or "desktop-user",
     )

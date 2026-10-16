@@ -70,6 +70,23 @@ def test_healthy_project_scan_is_read_only_and_silent(tmp_path: Path) -> None:
     assert project.database_path.stat().st_mtime_ns == before
 
 
+def test_imported_empty_folder_is_not_mistaken_for_orphan_snapshot(tmp_path: Path) -> None:
+    source = tmp_path / "empty"
+    source.mkdir()
+    application, project = _project(tmp_path)
+    application.add_workspace_inputs(AddWorkspaceInputsRequest(
+        project_id=project.project_id,
+        database_path=project.database_path,
+        input_paths=(source,),
+        actor="tester",
+        expected_workspace_revision=0,
+    ))
+
+    result = _inspect(application, project)
+    assert not result.recovery_required
+    assert result.candidates == ()
+
+
 def test_snapshot_inspecting_is_a_valid_resumable_state(tmp_path: Path) -> None:
     source = tmp_path / "pending-inspection.txt"
     source.write_text("captured", encoding="utf-8")

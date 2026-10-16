@@ -59,8 +59,18 @@ def test_workbench_visual_hierarchy_preserves_the_existing_file_flow(
     assert window.right_tabs.tabText(0) == "文件详情"
     assert window.right_tabs.tabText(1) == "活动记录"
     assert window.open_selected_button.property("variant") == "primary"
-    assert window.left_tabs.minimumWidth() == 620
-    assert window.right_tabs.minimumWidth() == 390
+    assert window.left_tabs.minimumWidth() == 520
+    assert window.right_tabs.minimumWidth() == 315
+    assert window.left_tabs.tabBar().isHidden()
+    assert window.right_tabs.tabBar().isHidden()
+    assert window.search_filters.isHidden()
+    assert window.advanced_panel.isHidden()
+    assert window.toolbar.isHidden()
+    assert window.context_view.section_pane.isHidden()
+    assert window.context_view.content_search_panel.isHidden()
+    assert window.context_view.revision_panel.isHidden()
+    assert window.mode_tabs.tabText(0) == "工作区"
+    assert window.mode_tabs.tabText(1) == "核心文件"
     assert not window.new_project_action.icon().isNull()
     assert not window.export_action.icon().isNull()
 
@@ -74,10 +84,26 @@ def test_workbench_visual_hierarchy_preserves_the_existing_file_flow(
 
     assert window.project_location.text() == "直觉工作台"
     assert "Revision 1" in window.project_meta.text()
+    assert window.project_meta.isHidden()
     assert window.project_state.text() == "工作区就绪"
     assert window.detail_title.text() == "供应商报价.txt"
     detail_text = window.details.toPlainText()
     assert "工作区信息" in detail_text
     assert "来源" in detail_text
     assert "按需准备（尚未打开）" in detail_text
+    assert window.detail_status.text() == "按需准备（尚未打开）"
+    assert window.add_to_context_button.isEnabled()
+    assert window.advanced_panel.isHidden()
+    window.advanced_toggle.click()
+    assert not window.advanced_panel.isHidden()
+    window.filter_button.click()
+    assert not window.search_filters.isHidden()
+    window.trash_button.click()
+    assert window.left_tabs.currentWidget() is window.deleted_items
+    window.back_to_tree_button.click()
+    assert window.left_tabs.currentWidget() is window.tree
+    window.activity_button.click()
+    assert window.right_tabs.currentWidget() is window.events
+    window.activity_button.click()
+    assert window.right_tabs.currentWidget() is window.details_page
     window.close()

@@ -5,6 +5,8 @@ from pathlib import Path
 from pig.application.contracts import (
     GetWorkspaceItemRequest,
     GetWorkspaceItemResult,
+    GetWorkspacePhysicalLocationRequest,
+    GetWorkspacePhysicalLocationResult,
     GetWorkspaceTreeRequest,
     GetWorkspaceTreeResult,
     SearchWorkspaceItemsRequest,
@@ -12,8 +14,9 @@ from pig.application.contracts import (
     WorkspaceItemView,
 )
 from pig.application.errors import ApplicationError
-from pig.application.ports import ProjectDatabaseProvider
+from pig.application.ports import ProjectDatabaseProvider, OriginalSnapshotStore, WorkingArtifactStore
 from pig.domain.enums import (
+    ErrorCode,
     NodeFormat,
     WorkingContentStatus,
     WorkspaceItemLifecycleStatus,
@@ -25,8 +28,59 @@ from pig.domain.model_version import CURRENT_PROJECT_MODEL_VERSION
 class WorkspaceQueryService:
     """Read-only Workspace projection for UI and future Tool callers."""
 
-    def __init__(self, *, database: ProjectDatabaseProvider) -> None:
+    def __init__(self, *, database: ProjectDatabaseProvider,
+                 originals: OriginalSnapshotStore | None = None,
+                 working_store: WorkingArtifactStore | None = None) -> None:
         self._database = database
+        self._originals = originals
+        self._working_store = working_store
+
+    def physical_location(
+        self, request: GetWorkspacePhysicalLocationRequest,
+    ) -> GetWorkspacePhysicalLocationResult:
+        project_id, database_path = self._identity(request.project_id, request.database_path)
+        with self._database.unit_of_work(database_path) as uow:
+            project = uow.projects.get(project_id)
+            if project is None:
+                raise EntityNotFoundError(f"project not found: {project_id}")
+            self._project(project, database_path)
+            record = uow.workspace.read_record_for_item(project_id, request.workspace_item_id)
+            if record is None or not record.effectively_active:
+                raise EntityNotFoundError(f"workspace item not found: {request.workspace_item_id}")
+            working_path = None
+            if record.working_artifact is not None and self._working_store is not None:
+                working_path = self._working_store.display_path(
+                    database_path.parent, record.working_artifact.storage_key
+                )
+            original_path = None
+            original_is_parent_container = False
+            if record.source is not None and record.source_node is not None and self._originals is not None:
+                entries = uow.imports.entries_for_snapshot(record.source.snapshot_id)
+                direct = next((entry for entry in entries
+                               if entry.source_node_id == record.source_node.id
+                               and entry.artifact_id is not None), None)
+                root = next((entry for entry in entries
+                             if entry.source_node_id == record.source.root_node_id
+                             and entry.artifact_id is not None), None)
+                selected = direct or root
+                if selected is not None:
+                    artifact = uow.imports.get_original_artifact(selected.artifact_id)
+                    if artifact is not None:
+                        try:
+                            original_path = self._originals.artifact_path(
+                                database_path.parent, artifact
+                            )
+                        except ApplicationError as exc:
+                            if exc.code != ErrorCode.ARTIFACT_MISSING.value:
+                                raise
+                        original_is_parent_container = direct is None
+            return GetWorkspacePhysicalLocationResult(
+                workspace_item_id=record.item.id,
+                logical_path=record.workspace_path,
+                working_path=working_path,
+                original_path=original_path,
+                original_is_parent_container=original_is_parent_container,
+            )
 
     def tree(self, request: GetWorkspaceTreeRequest) -> GetWorkspaceTreeResult:
         project_id, database_path = self._identity(

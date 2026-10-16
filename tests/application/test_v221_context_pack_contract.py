@@ -116,7 +116,7 @@ def test_plan_reads_exact_revision_sections_and_guidance_without_writes(tmp_path
     assert entry.section_ids == (section.section.id,)
     assert entry.guidance_body == "Read before delivery"
     assert entry.purpose == "Approved brief"
-    assert entry.relative_path.startswith(f"files/{promoted.item.id}/")
+    assert entry.relative_path == "files/brief.txt"
     assert len(plan.plan_fingerprint) == 64
     assert app.get_context_pack_plan(request).plan_fingerprint == plan.plan_fingerprint
     assert app.get_project_context(GetProjectContextRequest(

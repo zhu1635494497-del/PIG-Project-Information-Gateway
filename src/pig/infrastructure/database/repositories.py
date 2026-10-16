@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Iterable, Optional, Sequence
 
-from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy import func, insert, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from pig.domain import entities, enums
@@ -1607,10 +1607,15 @@ class SqlAlchemyProcessingRepository:
             .where(models.ProcessingEventModel.project_id == project_id)
             .order_by(
                 models.ProcessingEventModel.occurred_at,
-                models.ProcessingEventModel.id,
+                # UUID order is unrelated to append order when timestamps tie.
+                text("processing_events.rowid"),
             )
         ).all()
         return [_event_from_model(row) for row in rows]
+
+    def get_event(self, event_id: str) -> Optional[entities.ProcessingEvent]:
+        row = self._session.get(models.ProcessingEventModel, event_id)
+        return None if row is None else _event_from_model(row)
 
     def recent_events_for_project(
         self, project_id: str, *, limit: int
@@ -1620,7 +1625,7 @@ class SqlAlchemyProcessingRepository:
             .where(models.ProcessingEventModel.project_id == project_id)
             .order_by(
                 models.ProcessingEventModel.occurred_at.desc(),
-                models.ProcessingEventModel.id.desc(),
+                text("processing_events.rowid DESC"),
             )
             .limit(limit)
         ).all()

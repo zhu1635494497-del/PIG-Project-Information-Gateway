@@ -1,49 +1,38 @@
 # 为 PIG 贡献 / Contributing to PIG
 
-## 中文
+请先阅读 [主规则](PIG%20Project%20Rules.md)、[当前范围](docs/project-rules/CURRENT_SCOPE.md)
+与[当前规划索引](docs/PIG-planning-index.md)，再按任务读取适用子规则和 ADR。
 
-感谢参与 PIG。提交变更前请先阅读：
+Read the [main rules](PIG%20Project%20Rules.md), [current scope](docs/project-rules/CURRENT_SCOPE.md),
+and [active index](docs/PIG-planning-index.md), then relevant subrules and ADRs.
 
-1. `PIG Project Rules.md`；
-2. `docs/PIG-V1-planning-index.md`；
-3. 与变更相关的当前 ADR、领域和 Milestone 文档。
+## 1. 贡献边界 / Contribution boundaries
 
-贡献必须遵守以下边界：
+- 必须遵守当前授权和已接受 ADR；已有范围授权包含正常实现与必要验证。
+- 不得提交真实客户资料、Project SQLite、验收输出、日志、凭据或签名材料。
+- 按 [DEVELOPMENT](docs/project-rules/DEVELOPMENT.md) 分级说明影响并执行相称验证。
+- 规范 Markdown 同步中英文，中文为准；检查相对链接和入口。
+- 不为当前无价值的 AI、平台或基础设施扩大范围。
 
-- 先说明 Domain、Flow、State、Lineage、Log、Permission、Tool、AI、Automation 和 UI
-  影响；
-- 不得越过当前授权 Milestone，或静默改变已经批准的 ADR；
-- 不得提交真实客户文件、Project SQLite、验收输出、日志、密钥、证书或本机路径；
-- PIG 自有 Markdown 必须同步提供中文和英文；
-- 新行为必须有与风险相称的自动化测试；
-- 不得为当前无价值的 AI、微服务、消息队列或其他平台扩大范围。
+- Honor current authorization and accepted ADRs; scope authorization includes normal implementation and necessary checks.
+- Never commit real client material, project databases, acceptance outputs, logs, credentials, or signing materials.
+- Use [DEVELOPMENT](docs/project-rules/DEVELOPMENT.md) risk-based impact reporting and verification.
+- Keep normative Markdown bilingual with Chinese authoritative; check links and entry points.
+- Do not expand into AI, platforms, or infrastructure without current value and authorization.
 
-建议流程：先创建说明问题和边界的 Issue，再从短生命周期分支提交 Pull Request。PR
-应说明测试命令、结果、未闭环边界和安全影响。涉及核心领域、数据库、GUI Framework、
-Original Policy、Workspace Layout、AI Framework 或发布安全的变化必须先提出 ADR。
+## 2. 提交与评审 / Submission and review
 
-## English
+建议使用短生命周期分支与 Pull Request；复杂改动可以先创建 Issue 明确问题和边界，
+小修复无需机械创建 Issue。PR 先说明问题与结果，再给出关键测试证据、限制和风险。
+涉及长期所有权、兼容、安全、运行模型或重要依赖取舍时应该写 ADR；常规修复不需要。
 
-Thank you for contributing to PIG. Before changing the repository, read:
+Prefer short-lived branches and pull requests. An Issue may define complex changes first;
+small fixes need no ritual Issue. Lead PRs with the problem and result, then key verification,
+limits, and risks. Use ADRs for durable ownership, compatibility, safety, execution, or major
+dependency trade-offs, not routine fixes.
 
-1. `PIG Project Rules.md`;
-2. `docs/PIG-V1-planning-index.md`;
-3. the active ADR, domain, and milestone documents relevant to the change.
+行为验收与发布资格分别记录。发布相关变更沿用现有发布与安全清单，不把源码测试
+通过宣称为签名发行或异机验证。
 
-Contributions must follow these boundaries:
-
-- state Domain, Flow, State, Lineage, Log, Permission, Tool, AI, Automation, and
-  UI impact first;
-- do not cross the authorized milestone or silently override an accepted ADR;
-- never commit real customer files, Project SQLite databases, acceptance output,
-  logs, keys, certificates, or local paths;
-- keep all first-party PIG Markdown synchronized in Chinese and English;
-- cover new behavior with tests proportionate to its risk;
-- do not expand into premature AI, microservices, message queues, or other
-  platforms without current product value.
-
-Prefer an Issue that defines the problem and boundary, followed by a short-lived
-branch and Pull Request. The PR should report test commands/results, remaining
-gaps, and safety impact. Changes to the core domain, database, GUI framework,
-Original Policy, Workspace Layout, AI framework, or release security require an
-ADR first.
+Record behavior acceptance and release qualification separately. Release changes use existing
+release/security checklists; source tests do not establish signed distribution or cross-machine validation.

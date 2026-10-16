@@ -8,7 +8,7 @@ project_root = Path(SPECPATH).parent
 hidden_imports = (
     collect_submodules("extract_msg")
     + collect_submodules("py7zr")
-    + ["sqlalchemy.dialects.sqlite.pysqlite"]
+    + ["sqlalchemy.dialects.sqlite.pysqlite", "pig.infrastructure.content.worker"]
 )
 migrations_root = project_root / "migrations"
 datas = [

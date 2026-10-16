@@ -33,6 +33,7 @@ from pig.domain.enums import (
     WorkingContentStatus,
     WorkingRefreshReason,
     WorkspaceItemKind,
+    NodeFormat,
 )
 from pig.domain.exceptions import ConcurrentStateError, EntityNotFoundError
 from pig.domain.model_version import CURRENT_PROJECT_MODEL_VERSION
@@ -111,7 +112,7 @@ class ContextCaptureService:
             if (
                 workspace_item is None
                 or workspace_item.project_id != project_id
-                or workspace_item.item_kind != WorkspaceItemKind.FILE
+                or workspace_item.item_kind not in (WorkspaceItemKind.FILE, WorkspaceItemKind.CONTAINER_VIEW)
                 or not uow.workspace.is_effectively_active(workspace_item.id)
                 or workspace_item.origin_source_node_id is None
             ):
@@ -126,6 +127,9 @@ class ContextCaptureService:
             node = uow.catalog.get_node(workspace_item.origin_source_node_id)
             if node is None:
                 raise ApplicationError(ErrorCode.CONTEXT_CAPTURE_SOURCE_MISSING.value, "source node is missing")
+            if workspace_item.item_kind == WorkspaceItemKind.CONTAINER_VIEW and node.format != NodeFormat.EML:
+                raise ApplicationError(ErrorCode.CONTEXT_CAPTURE_SOURCE_MISSING.value,
+                                       "only EML container views can be captured")
             source_kind = (
                 ContextRevisionSourceKind.WORKING
                 if working is not None

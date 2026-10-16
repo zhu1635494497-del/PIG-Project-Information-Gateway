@@ -1,6 +1,6 @@
 # PIG V2 Project Context 范围 / PIG V2 Project Context Scope
 
-- 状态：V2.1 本轮验收通过；D120-A 至 D126-A 已批准，V2.2 全段获授权 / Status: V2.1 accepted in this run; D120-A through D126-A approved, all V2.2 stages authorized
+- 当前阶段与签收以 [CURRENT_SCOPE](../project-rules/CURRENT_SCOPE.md) 为准 / Active phase and acceptance follow [CURRENT_SCOPE](../project-rules/CURRENT_SCOPE.md)
 - 日期：2026-10-07 / Date: 2026-10-07
 - 约束决策：`ADR-010`、`ADR-024`、`ADR-025` / Governing decisions: `ADR-010`, `ADR-024`, `ADR-025`
 

@@ -1773,6 +1773,17 @@ class SqlAlchemyWorkspaceRepository:
         self._session.flush()
         return _placement_from_model(placement)
 
+    def rename_item(
+        self, item_id: str, *, display_name: str, updated_at: datetime
+    ) -> entities.WorkspaceItem:
+        row = self._item_row(item_id)
+        if not self.is_effectively_active(item_id):
+            raise InvariantViolationError("workspace item is not active")
+        row.display_name = display_name
+        row.updated_at = updated_at
+        self._session.flush([row])
+        return _workspace_item_from_model(row)
+
     def soft_delete_item(
         self,
         item_id: str,

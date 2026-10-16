@@ -26,6 +26,7 @@ from pig.domain.entities import (
     WorkspaceItem,
     WorkspacePlacement,
 )
+from pig.application.experience_contracts import BundleExperienceRecord, BundleObservedEvent
 from pig.domain.enums import (
     ContextPackFormat,
     ContextRevisionCaptureStatus,
@@ -281,6 +282,17 @@ class MoveWorkspaceItemRequest:
     expected_workspace_revision: int
     new_parent_workspace_item_id: Optional[str] = None
     new_ordinal: int = 0
+    undo_of_workspace_revision: Optional[int] = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RenameWorkspaceItemRequest:
+    project_id: str
+    database_path: Path
+    workspace_item_id: str
+    display_name: str
+    actor: str
+    expected_workspace_revision: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -412,6 +424,22 @@ class GetWorkspaceItemRequest:
 class GetWorkspaceItemResult:
     project: Project
     view: WorkspaceItemView
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GetWorkspacePhysicalLocationRequest:
+    project_id: str
+    database_path: Path
+    workspace_item_id: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GetWorkspacePhysicalLocationResult:
+    workspace_item_id: str
+    logical_path: str
+    working_path: Optional[Path]
+    original_path: Optional[Path]
+    original_is_parent_container: bool
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -857,6 +885,7 @@ class GetContextPackPlanRequest:
     database_path: Path
     selected_item_ids: Sequence[str] = ()
     revision_choices: Sequence[ContextPackRevisionChoice] = ()
+    selected_record_ids: Sequence[str] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -896,6 +925,8 @@ class GetContextPackPlanResult:
     sections: Sequence[ContextPackPlanSection]
     entries: Sequence[ContextPackPlanEntry]
     warning_item_ids: Sequence[str]
+    experience_records: Sequence[BundleExperienceRecord] = ()
+    observed_events: Sequence[BundleObservedEvent] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -907,6 +938,7 @@ class PreflightContextPackExportRequest:
     actor: str
     selected_item_ids: Sequence[str] = ()
     revision_choices: Sequence[ContextPackRevisionChoice] = ()
+    selected_record_ids: Sequence[str] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -929,6 +961,7 @@ class ExecuteContextPackExportRequest:
     actor: str
     selected_item_ids: Sequence[str] = ()
     revision_choices: Sequence[ContextPackRevisionChoice] = ()
+    selected_record_ids: Sequence[str] = ()
     confirm_outdated: bool = False
 
 

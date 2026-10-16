@@ -17,7 +17,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QAction, QBrush, QColor, QCloseEvent, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -51,9 +51,11 @@ from pig.application import (
     ExportWorkspaceItemsRequest,
     GetRecentProjectEventsRequest,
     GetWorkspaceTreeRequest,
+    GetWorkspacePhysicalLocationRequest,
     InspectProjectRecoveryRequest,
     LoadProjectRequest,
     MoveWorkspaceItemRequest,
+    RenameWorkspaceItemRequest,
     OpenWorkspaceItemRequest,
     OperationControl,
     OperationProgressSnapshot,
@@ -72,8 +74,10 @@ from pig.application import (
 )
 from pig.application.errors import ApplicationError
 from pig.domain.enums import (
+    EventType,
     NodeFormat,
     NodeKind,
+    NodeProcessingStatus,
     WorkingContentStatus,
     WorkingRefreshReason,
     WorkspaceItemKind,
@@ -86,6 +90,27 @@ from pig.ui.context_view import ProjectContextView
 T = TypeVar("T")
 ITEM_ID_ROLE = int(Qt.ItemDataRole.UserRole)
 ITEM_KIND_ROLE = ITEM_ID_ROLE + 1
+
+_SOURCE_FAILURE_STATUSES = frozenset({
+    NodeProcessingStatus.INTERRUPTED.value,
+    NodeProcessingStatus.UNSUPPORTED.value,
+    NodeProcessingStatus.PASSWORD_REQUIRED.value,
+    NodeProcessingStatus.CORRUPTED.value,
+    NodeProcessingStatus.LIMIT_EXCEEDED.value,
+    NodeProcessingStatus.SECURITY_BLOCKED.value,
+    NodeProcessingStatus.SOURCE_MISSING.value,
+    NodeProcessingStatus.SOURCE_CHANGED.value,
+    NodeProcessingStatus.FAILED.value,
+})
+
+
+def _visible_file_status(view: WorkspaceItemView) -> str:
+    """Show source failures before the otherwise-correct lazy-copy status."""
+    if view.working_artifact is not None:
+        return view.working_artifact.content_status.value
+    if view.source_node is not None and view.source_node.status.value in _SOURCE_FAILURE_STATUSES:
+        return view.source_node.status.value
+    return view.item.materialization_status.value
 
 
 class EnumMultiSelect(QToolButton):
@@ -147,6 +172,7 @@ class WorkspaceTreeModel(QAbstractItemModel):
         self._row_by_id: dict[str, int] = {}
         self._display_values: dict[str, tuple[str, str, str, str]] = {}
         self._icons: dict[str, object] = {}
+        self._drop_target_id: str | None = None
 
     def set_views(self, views: Iterable[WorkspaceItemView]) -> None:
         values = tuple(views)
@@ -184,11 +210,7 @@ class WorkspaceTreeModel(QAbstractItemModel):
                 view.item.display_name,
                 view.item.item_kind.value,
                 "" if view.source_node is None else view.source_node.format.value,
-                (
-                    view.working_artifact.content_status.value
-                    if view.working_artifact is not None
-                    else view.item.materialization_status.value
-                ),
+                _visible_file_status(view),
             )
             for item_id, view in views.items()
         }
@@ -201,7 +223,23 @@ class WorkspaceTreeModel(QAbstractItemModel):
         self._row_by_id = row_by_id
         self._display_values = display_values
         self._icons = {}
+        self._drop_target_id = None
         self.endResetModel()
+
+    def set_drop_target(self, item_id: str | None) -> None:
+        if item_id == self._drop_target_id:
+            return
+        previous = self._drop_target_id
+        self._drop_target_id = item_id
+        for value in (previous, item_id):
+            if value is None:
+                continue
+            index = self.index_for_id(value)
+            if index.isValid():
+                self.dataChanged.emit(
+                    index, index.siblingAtColumn(self.columnCount() - 1),
+                    [Qt.ItemDataRole.BackgroundRole],
+                )
 
     @property
     def views(self) -> dict[str, WorkspaceItemView]:
@@ -278,6 +316,8 @@ class WorkspaceTreeModel(QAbstractItemModel):
                 icon = self._icon_provider(view)
                 self._icons[view.item.id] = icon
             return icon
+        if role == Qt.ItemDataRole.BackgroundRole and view.item.id == self._drop_target_id:
+            return QBrush(QColor("#d9ede8"))
         if role == Qt.ItemDataRole.ToolTipRole:
             if index.column() == 0:
                 return view.workspace_path
@@ -371,6 +411,7 @@ class WorkspaceTree(QTreeView):
     move_requested = Signal(str, object, int)
     itemSelectionChanged = Signal()
     itemDoubleClicked = Signal(object, int)
+    drag_destination_changed = Signal(str)
 
     def __init__(self, parent=None, *, icon_provider=None) -> None:
         super().__init__(parent)
@@ -390,6 +431,8 @@ class WorkspaceTree(QTreeView):
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setAutoExpandDelay(-1)
+        self.setExpandsOnDoubleClick(False)
         self.selectionModel().selectionChanged.connect(
             lambda *_args: self.itemSelectionChanged.emit()
         )
@@ -438,8 +481,52 @@ class WorkspaceTree(QTreeView):
         else:
             event.ignore()
 
+    def dragMoveEvent(self, event) -> None:
+        super().dragMoveEvent(event)
+        if not (event.mimeData().hasUrls() or event.source() is self):
+            self._clear_drop_target()
+            return
+        target = self.itemAt(event.position().toPoint())
+        indicator = self.dropIndicatorPosition()
+        parent_id, _ordinal, hint = self._drop_destination(target, indicator)
+        self.model().set_drop_target(parent_id)
+        self.drag_destination_changed.emit(hint)
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._clear_drop_target()
+        super().dragLeaveEvent(event)
+
+    def _clear_drop_target(self) -> None:
+        self.model().set_drop_target(None)
+        self.drag_destination_changed.emit("")
+
+    def _drop_destination(self, target, indicator):
+        if target is None:
+            return None, self.topLevelItemCount(), "放到工作区根目录末尾"
+        if indicator == QAbstractItemView.DropIndicatorPosition.OnItem and (
+            target.data(0, ITEM_KIND_ROLE) == WorkspaceItemKind.FOLDER.value
+        ):
+            return (
+                target.data(0, ITEM_ID_ROLE), target.childCount(),
+                f"放入文件夹「{target.text(0)}」",
+            )
+        parent = target.parent()
+        parent_id = None if parent is None else parent.data(0, ITEM_ID_ROLE)
+        row = self.indexOfTopLevelItem(target) if parent is None else parent.indexOfChild(target)
+        after = indicator in {
+            QAbstractItemView.DropIndicatorPosition.BelowItem,
+            QAbstractItemView.DropIndicatorPosition.OnItem,
+        }
+        destination = "工作区根目录" if parent is None else f"文件夹「{parent.text(0)}」"
+        relation = "之后" if after else "之前"
+        return parent_id, row + int(after), f"放在「{target.text(0)}」{relation} · {destination}"
+
     def dropEvent(self, event: QDropEvent) -> None:
         target = self.itemAt(event.position().toPoint())
+        indicator = self.dropIndicatorPosition()
+        parent_id, ordinal, _hint = self._drop_destination(target, indicator)
+        self._clear_drop_target()
         if event.mimeData().hasUrls():
             paths = tuple(
                 Path(url.toLocalFile()).absolute()
@@ -447,18 +534,7 @@ class WorkspaceTree(QTreeView):
                 if url.isLocalFile()
             )
             if paths:
-                if target is None:
-                    target_id = None
-                elif self.dropIndicatorPosition() == (
-                    QAbstractItemView.DropIndicatorPosition.OnItem
-                ):
-                    target_id = target.data(0, ITEM_ID_ROLE)
-                else:
-                    parent = target.parent()
-                    target_id = (
-                        None if parent is None else parent.data(0, ITEM_ID_ROLE)
-                    )
-                self.external_paths_dropped.emit(paths, target_id)
+                self.external_paths_dropped.emit(paths, parent_id)
                 event.acceptProposedAction()
             else:
                 event.ignore()
@@ -468,34 +544,6 @@ class WorkspaceTree(QTreeView):
             event.ignore()
             return
         source_id = source.data(0, ITEM_ID_ROLE)
-        if target is None:
-            parent_id = None
-            ordinal = self.topLevelItemCount()
-        elif self.dropIndicatorPosition() == (
-            QAbstractItemView.DropIndicatorPosition.OnItem
-        ) and target.data(0, ITEM_KIND_ROLE) in {
-            WorkspaceItemKind.FOLDER.value,
-            WorkspaceItemKind.CONTAINER_VIEW.value,
-        }:
-            parent_id = target.data(0, ITEM_ID_ROLE)
-            ordinal = target.childCount()
-        else:
-            parent = target.parent()
-            parent_id = None if parent is None else parent.data(0, ITEM_ID_ROLE)
-            base_ordinal = (
-                self.indexOfTopLevelItem(target)
-                if parent is None
-                else parent.indexOfChild(target)
-            )
-            ordinal = base_ordinal + (
-                1
-                if self.dropIndicatorPosition()
-                in {
-                    QAbstractItemView.DropIndicatorPosition.BelowItem,
-                    QAbstractItemView.DropIndicatorPosition.OnItem,
-                }
-                else 0
-            )
         self.move_requested.emit(source_id, parent_id, ordinal)
         event.acceptProposedAction()
 
@@ -549,6 +597,8 @@ class MainWindow(QMainWindow):
         self._database_path: Path | None = None
         self._workspace_revision = 0
         self._views: dict[str, WorkspaceItemView] = {}
+        self._tree_initialized = False
+        self._last_move_undo: tuple[str, str, str | None, int, int] | None = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pig-ui")
         self._worker_thread: Future | None = None
         self._background_success: Callable[[object], None] | None = None
@@ -585,9 +635,12 @@ class MainWindow(QMainWindow):
         self.add_files_action = QAction("添加文件", self)
         self.add_folder_action = QAction("添加文件夹", self)
         self.create_folder_action = QAction("新建工作区文件夹", self)
+        self.undo_move_action = QAction("撤销上次移动", self)
+        self.undo_move_action.setShortcut("Ctrl+Z")
+        self.undo_move_action.setEnabled(False)
         self.delete_action = QAction("软删除", self)
         self.refresh_action = QAction("刷新工作区", self)
-        self.export_action = QAction("导出所选", self)
+        self.export_action = QAction("导出", self)
         standard_icons = {
             self.new_project_action: QStyle.StandardPixmap.SP_FileDialogNewFolder,
             self.open_project_action: QStyle.StandardPixmap.SP_DialogOpenButton,
@@ -622,6 +675,7 @@ class MainWindow(QMainWindow):
         self.add_files_action.triggered.connect(self._choose_files)
         self.add_folder_action.triggered.connect(self._choose_folder)
         self.create_folder_action.triggered.connect(self._create_folder)
+        self.undo_move_action.triggered.connect(self._undo_last_move)
         self.delete_action.triggered.connect(self._delete_selected)
         self.refresh_action.triggered.connect(self._reload_workspace)
         self.export_action.triggered.connect(self._export_selected)
@@ -645,23 +699,33 @@ class MainWindow(QMainWindow):
         self.toolbar.addSeparator()
         for action in (self.refresh_action, self.export_action, self.delete_action):
             self.toolbar.addAction(action)
+        # Keep shortcut-bearing actions on the window when the legacy toolbar is hidden.
+        for action in (self.new_project_action, self.open_project_action, self.refresh_action,
+                       self.undo_move_action):
+            self.addAction(action)
+        self.toolbar.hide()
 
     def _build_ui(self) -> None:
         root = WorkbenchDropSurface(self)
         self.drop_surface = root
         root.external_paths_dropped.connect(lambda paths: self._add_inputs(paths, None))
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(11)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        shell = QWidget()
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(12, 10, 12, 10)
+        shell_layout.setSpacing(8)
 
         project_header = QFrame()
         project_header.setObjectName("projectHeader")
         project_header_layout = QHBoxLayout(project_header)
         project_header_layout.setContentsMargins(16, 12, 16, 12)
         project_header_layout.setSpacing(12)
-        project_identity = QVBoxLayout()
-        project_identity.setSpacing(1)
-        product_eyebrow = QLabel("PIG  ·  PROJECT WORKBENCH")
+        project_identity = QHBoxLayout()
+        project_identity.setSpacing(10)
+        product_eyebrow = QLabel("PIG")
         product_eyebrow.setObjectName("productEyebrow")
         self.project_location = QLabel("尚未打开项目")
         self.project_location.setObjectName("projectTitle")
@@ -677,38 +741,66 @@ class MainWindow(QMainWindow):
         )
         project_identity.addWidget(product_eyebrow)
         project_identity.addWidget(self.project_location)
-        project_identity.addWidget(self.project_meta)
+        self.project_meta.hide()
+        self.project_meta.setParent(project_header)
         project_header_layout.addLayout(project_identity, 1)
         self.project_state = QLabel("未打开")
         self.project_state.setObjectName("projectState")
         self.project_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.project_state.hide()
         project_header_layout.addWidget(
             self.project_state, 0, Qt.AlignmentFlag.AlignVCenter
         )
-        layout.addWidget(project_header)
+        self.project_menu_button = QToolButton()
+        self.project_menu_button.setText("项目")
+        self.project_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        project_menu = QMenu(self.project_menu_button)
+        project_menu.addAction(self.new_project_action)
+        project_menu.addAction(self.open_project_action)
+        project_menu.addSeparator()
+        project_menu.addAction(self.recovery_action)
+        self.project_menu_button.setMenu(project_menu)
+        self.import_button = QToolButton()
+        self.import_button.setText("＋ 导入")
+        self.import_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        import_menu = QMenu(self.import_button)
+        import_menu.addAction(self.add_files_action)
+        import_menu.addAction(self.add_folder_action)
+        self.import_button.setMenu(import_menu)
+        self.export_button = QToolButton()
+        self.export_button.setDefaultAction(self.export_action)
+        self.export_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.more_button = QToolButton()
+        self.more_button.setText("···")
+        self.more_button.setToolTip("更多工作区操作")
+        self.more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        more_menu = QMenu(self.more_button)
+        more_menu.addAction(self.create_folder_action)
+        more_menu.addAction(self.undo_move_action)
+        more_menu.addAction(self.refresh_action)
+        more_menu.addSeparator()
+        more_menu.addAction(self.delete_action)
+        self.more_button.setMenu(more_menu)
+        for button in (
+            self.project_menu_button, self.import_button,
+            self.export_button, self.more_button,
+        ):
+            project_header_layout.addWidget(button)
+        shell_layout.addWidget(project_header)
 
         self.recovery_banner = QLabel()
         self.recovery_banner.setObjectName("recoveryBanner")
         self.recovery_banner.setWordWrap(True)
         self.recovery_banner.hide()
-        layout.addWidget(self.recovery_banner)
+        shell_layout.addWidget(self.recovery_banner)
 
         search_panel = QFrame()
         search_panel.setObjectName("searchPanel")
         search_panel_layout = QHBoxLayout(search_panel)
         search_panel_layout.setContentsMargins(12, 9, 12, 9)
         search_panel_layout.setSpacing(8)
-        search_label_group = QVBoxLayout()
-        search_label_group.setSpacing(0)
-        search_title = QLabel("查找文件")
-        search_title.setObjectName("searchTitle")
-        search_hint = QLabel("名称、路径或来源")
-        search_hint.setObjectName("sectionHint")
-        search_label_group.addWidget(search_title)
-        search_label_group.addWidget(search_hint)
-        search_panel_layout.addLayout(search_label_group)
         self.search_text = QLineEdit()
-        self.search_text.setPlaceholderText("输入关键词…")
+        self.search_text.setPlaceholderText("查找文件")
         self.search_text.setClearButtonEnabled(True)
         self.format_filter = FormatMultiSelect()
         self.format_filter.setProperty("filter", True)
@@ -723,29 +815,62 @@ class MainWindow(QMainWindow):
         self.search_button.clicked.connect(self._search)
         self.clear_search_button.clicked.connect(self._clear_search)
         self.search_text.returnPressed.connect(self._search)
+        self.search_filters = QWidget()
+        filter_layout = QHBoxLayout(self.search_filters)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(6)
+        filter_layout.addWidget(self.format_filter)
+        filter_layout.addWidget(self.content_filter)
+        self.search_filters.hide()
+        self.filter_button = QPushButton("筛选")
+        self.filter_button.setCheckable(True)
+        self.filter_button.setProperty("variant", "quiet")
+        self.filter_button.toggled.connect(self.search_filters.setVisible)
         search_panel_layout.addWidget(self.search_text, 1)
-        search_panel_layout.addWidget(self.format_filter)
-        search_panel_layout.addWidget(self.content_filter)
+        search_panel_layout.addWidget(self.search_filters)
+        search_panel_layout.addWidget(self.filter_button)
         search_panel_layout.addWidget(self.search_button)
+        self.clear_search_button.hide()
         search_panel_layout.addWidget(self.clear_search_button)
-        layout.addWidget(search_panel)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
         splitter.setHandleWidth(8)
+        left_pane = QWidget()
+        left_layout = QVBoxLayout(left_pane)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(7)
+        list_header = QHBoxLayout()
+        self.list_heading = QLabel("全部文件")
+        self.list_heading.setObjectName("sectionTitle")
+        self.new_folder_button = QToolButton()
+        self.new_folder_button.setDefaultAction(self.create_folder_action)
+        self.new_folder_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        list_header.addWidget(self.list_heading)
+        list_header.addStretch(1)
+        list_header.addWidget(self.new_folder_button)
+        self.drag_destination = QLabel("")
+        self.drag_destination.setObjectName("dragDestination")
+        self.drag_destination.hide()
+        left_layout.addLayout(list_header)
+        left_layout.addWidget(self.drag_destination)
+        left_layout.addWidget(search_panel)
         self.left_tabs = QTabWidget()
-        self.left_tabs.setMinimumWidth(620)
+        self.left_tabs.setMinimumWidth(520)
         self.tree = WorkspaceTree(icon_provider=self._workspace_item_icon)
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
         self.tree.setIndentation(20)
         self.tree.header().setHighlightSections(False)
+        self.tree.hideColumn(1)
+        self.tree.hideColumn(2)
         self.tree.itemSelectionChanged.connect(self._tree_selection_changed)
         self.tree.itemDoubleClicked.connect(self._tree_double_clicked)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         self.tree.external_paths_dropped.connect(self._add_inputs)
         self.tree.move_requested.connect(self._move_item)
+        self.tree.drag_destination_changed.connect(self._show_drag_destination)
         self.search_results = QTableWidget(0, 5)
         self.search_results.setHorizontalHeaderLabels(
             ["名称", "Workspace Path", "类型", "格式", "工作状态"]
@@ -758,6 +883,7 @@ class MainWindow(QMainWindow):
         )
         self.search_results.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._polish_table(self.search_results, stretch_column=1)
+        self.search_results.hideColumn(2)
         self.search_results.itemSelectionChanged.connect(self._search_selection_changed)
         self.search_results.itemDoubleClicked.connect(self._search_double_clicked)
         self.search_results.setContextMenuPolicy(
@@ -785,10 +911,33 @@ class MainWindow(QMainWindow):
         self.left_tabs.addTab(self.tree, "工作区")
         self.left_tabs.addTab(self.search_results, "搜索结果")
         self.left_tabs.addTab(self.deleted_items, "回收站")
+        self.left_tabs.tabBar().hide()
+        self.left_tabs.currentChanged.connect(self._workspace_page_changed)
+        left_layout.addWidget(self.left_tabs, 1)
+        list_footer = QHBoxLayout()
+        self.back_to_tree_button = QPushButton("返回工作区")
+        self.back_to_tree_button.setProperty("variant", "quiet")
+        self.back_to_tree_button.clicked.connect(self._return_to_tree)
+        self.back_to_tree_button.hide()
+        self.trash_button = QPushButton("回收站")
+        self.trash_button.setProperty("variant", "quiet")
+        self.trash_button.clicked.connect(
+            lambda: self.left_tabs.setCurrentWidget(self.deleted_items)
+        )
+        self.activity_button = QPushButton("活动记录")
+        self.activity_button.setProperty("variant", "quiet")
+        self.activity_button.clicked.connect(self._toggle_activity)
+        list_footer.addWidget(self.back_to_tree_button)
+        list_footer.addStretch(1)
+        list_footer.addWidget(self.trash_button)
+        list_footer.addWidget(self.activity_button)
+        left_layout.addLayout(list_footer)
 
         self.right_tabs = QTabWidget()
-        self.right_tabs.setMinimumWidth(390)
+        self.right_tabs.setMinimumWidth(315)
+        self.right_tabs.tabBar().hide()
         details_page = QWidget()
+        self.details_page = details_page
         details_layout = QVBoxLayout(details_page)
         details_layout.setContentsMargins(12, 12, 12, 10)
         details_layout.setSpacing(8)
@@ -801,13 +950,16 @@ class MainWindow(QMainWindow):
         self.detail_subtitle.setWordWrap(True)
         details_layout.addWidget(self.detail_title)
         details_layout.addWidget(self.detail_subtitle)
+        self.detail_status = QLabel("")
+        self.detail_status.setObjectName("detailStatus")
+        self.detail_status.hide()
+        details_layout.addWidget(self.detail_status)
         self.details = QTextBrowser()
         self.details.setObjectName("itemDetails")
         self.details.setReadOnly(True)
         self.details.setAcceptDrops(False)
         self.details.setOpenExternalLinks(False)
         self.details.setHtml(self._empty_detail_html())
-        version_row = QHBoxLayout()
         version_group = QVBoxLayout()
         version_title = QLabel("版本保护")
         version_title.setObjectName("sectionTitle")
@@ -824,12 +976,15 @@ class MainWindow(QMainWindow):
         self.rollback_button.setEnabled(False)
         version_group.addWidget(version_title)
         version_group.addWidget(self.versions)
-        version_row.addLayout(version_group, 1)
-        version_row.addWidget(self.rollback_button, 0, Qt.AlignmentFlag.AlignBottom)
         button_row = QHBoxLayout()
         button_row.setSpacing(7)
-        self.open_selected_button = QPushButton("打开文件")
+        self.open_selected_button = QPushButton("打开")
         self.open_selected_button.setProperty("variant", "primary")
+        self.add_to_context_button = QPushButton("加入核心文件")
+        self.add_to_context_button.clicked.connect(self._promote_selected_to_context)
+        self.more_file_button = QToolButton()
+        self.more_file_button.setText("更多 ···")
+        self.more_file_button.clicked.connect(self._show_selected_more_menu)
         self.refresh_file_button = QPushButton("刷新状态")
         self.restore_working_button = QPushButton("从原始备份恢复")
         self.restore_deleted_button = QPushButton("恢复到工作区")
@@ -841,16 +996,36 @@ class MainWindow(QMainWindow):
         self.restore_deleted_button.clicked.connect(self._restore_deleted_item)
         for button in (
             self.open_selected_button,
-            self.refresh_file_button,
-            self.restore_working_button,
+            self.add_to_context_button,
             self.restore_deleted_button,
         ):
             button.setEnabled(False)
             button_row.addWidget(button)
+        button_row.addWidget(self.more_file_button)
         button_row.addStretch(1)
-        details_layout.addWidget(self.details, 1)
-        details_layout.addLayout(version_row)
         details_layout.addLayout(button_row)
+        self.advanced_toggle = QToolButton()
+        self.advanced_toggle.setText("来源与版本")
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.advanced_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.advanced_toggle.toggled.connect(self._toggle_advanced_details)
+        self.advanced_panel = QWidget()
+        advanced_layout = QVBoxLayout(self.advanced_panel)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.addWidget(self.details)
+        advanced_layout.addLayout(version_group)
+        advanced_actions = QHBoxLayout()
+        advanced_actions.addWidget(self.refresh_file_button)
+        advanced_actions.addWidget(self.restore_working_button)
+        advanced_actions.addWidget(self.rollback_button)
+        advanced_layout.addLayout(advanced_actions)
+        self.advanced_panel.hide()
+        details_layout.addWidget(self.advanced_toggle)
+        details_layout.addWidget(self.advanced_panel)
+        details_layout.addStretch(1)
         self.right_tabs.addTab(details_page, "文件详情")
         self.events = QTableWidget(0, 5)
         self.events.setHorizontalHeaderLabels(
@@ -859,11 +1034,11 @@ class MainWindow(QMainWindow):
         self.events.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._polish_table(self.events, stretch_column=2)
         self.right_tabs.addTab(self.events, "活动记录")
-        splitter.addWidget(self.left_tabs)
+        splitter.addWidget(left_pane)
         splitter.addWidget(self.right_tabs)
-        splitter.setStretchFactor(0, 8)
-        splitter.setStretchFactor(1, 5)
-        splitter.setSizes([840, 520])
+        splitter.setStretchFactor(0, 7)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([900, 400])
         layout.addWidget(splitter, 1)
         self.context_view = ProjectContextView(
             self._application,
@@ -873,10 +1048,14 @@ class MainWindow(QMainWindow):
         )
         self.mode_tabs = QTabWidget()
         self.mode_tabs.setObjectName("projectModeTabs")
-        self.mode_tabs.addTab(root, "Workspace")
-        self.mode_tabs.addTab(self.context_view, "Project Context")
+        self.mode_tabs.addTab(root, "工作区")
+        self.mode_tabs.addTab(self.context_view, "核心文件")
         self.mode_tabs.currentChanged.connect(self._project_mode_changed)
-        self.setCentralWidget(self.mode_tabs)
+        self.context_view.workspace_requested.connect(
+            lambda: self.mode_tabs.setCurrentWidget(root)
+        )
+        shell_layout.addWidget(self.mode_tabs, 1)
+        self.setCentralWidget(shell)
         for widget in (
             self.search_text,
             self.search_results,
@@ -899,7 +1078,69 @@ class MainWindow(QMainWindow):
         self.cancel_operation_button.hide()
         self.statusBar().addPermanentWidget(self.cancel_operation_button)
         self.statusBar().addPermanentWidget(self.busy_indicator)
-        self.statusBar().showMessage("请新建或打开一个 Workbench Project")
+        self.statusBar().showMessage("请新建或打开项目")
+
+    def _workspace_page_changed(self, _index: int) -> None:
+        current = self.left_tabs.currentWidget()
+        self.list_heading.setText(
+            "搜索结果" if current is self.search_results
+            else "回收站" if current is self.deleted_items
+            else "全部文件"
+        )
+        self.back_to_tree_button.setVisible(current is not self.tree)
+        self.new_folder_button.setVisible(current is self.tree)
+        self.search_text.setEnabled(
+            current is not self.deleted_items and self._worker_thread is None
+        )
+
+    def _return_to_tree(self) -> None:
+        if self.left_tabs.currentWidget() is self.search_results:
+            self._clear_search()
+        else:
+            self.left_tabs.setCurrentWidget(self.tree)
+        self.right_tabs.setCurrentWidget(self.details_page)
+        self.activity_button.setText("活动记录")
+
+    def _toggle_activity(self) -> None:
+        showing_events = self.right_tabs.currentWidget() is self.events
+        self.right_tabs.setCurrentWidget(
+            self.details_page if showing_events else self.events
+        )
+        self.activity_button.setText("活动记录" if showing_events else "文件详情")
+
+    def _toggle_advanced_details(self, expanded: bool) -> None:
+        self.advanced_panel.setVisible(expanded)
+        self.advanced_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+        )
+
+    def _promote_selected_to_context(self) -> None:
+        item_id = self.add_to_context_button.property("workspace_item_id")
+        view = self._views.get(item_id)
+        if view is not None:
+            self.context_view.promote_workspace_item(
+                item_id, view.item.display_name
+            )
+
+    def _show_selected_more_menu(self) -> None:
+        item_id = self.more_file_button.property("workspace_item_id")
+        view = self._views.get(item_id)
+        if view is None:
+            return
+        if view.effectively_active:
+            menu = self._active_context_menu(item_id)
+        else:
+            menu = QMenu(self)
+            menu.addAction("恢复到工作区", lambda: self._restore_item(item_id))
+            if self._is_import_root(view):
+                menu.addAction(
+                    "撤销此次误导入（彻底移除）",
+                    lambda: self._undo_import_item(item_id),
+                )
+        if menu is not None:
+            menu.exec(self.more_file_button.mapToGlobal(
+                self.more_file_button.rect().bottomLeft()
+            ))
 
     @staticmethod
     def _polish_table(table: QTableWidget, *, stretch_column: int) -> None:
@@ -923,6 +1164,7 @@ class MainWindow(QMainWindow):
     def _set_project_state(self, text: str, state: str = "idle") -> None:
         self.project_state.setText(text)
         self.project_state.setProperty("state", state)
+        self.project_state.setVisible(state == "warning")
         self.project_state.style().unpolish(self.project_state)
         self.project_state.style().polish(self.project_state)
 
@@ -961,9 +1203,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "项目已创建",
-            f"项目已保存到：\n{result.workspace_path}\n\n"
-            f"项目数据库：\n{result.database_path}\n\n"
-            f"内部项目 ID：{result.project_id}",
+            f"项目已保存到：\n{result.workspace_path}",
         )
 
     def _choose_project(self) -> None:
@@ -983,6 +1223,10 @@ class MainWindow(QMainWindow):
     def _project_loaded(self, project_id: str, database_path: Path) -> None:
         self._project_id = project_id
         self._database_path = Path(database_path)
+        self.tree.clear()
+        self._tree_initialized = False
+        self._last_move_undo = None
+        self.undo_move_action.setEnabled(False)
         self.context_view.set_project(project_id, database_path)
         self._recovery_required = True
         self._set_project_state("检查恢复状态", "warning")
@@ -1074,6 +1318,10 @@ class MainWindow(QMainWindow):
     def _activate_project(self, project_id: str, database_path: Path) -> None:
         self._project_id = project_id
         self._database_path = Path(database_path)
+        self.tree.clear()
+        self._tree_initialized = False
+        self._last_move_undo = None
+        self.undo_move_action.setEnabled(False)
         self.context_view.set_project(project_id, database_path)
         self._recovery_required = False
         self._recovery_inspection_token = None
@@ -1125,6 +1373,9 @@ class MainWindow(QMainWindow):
         self._reload_workspace()
 
     def _create_folder(self) -> None:
+        self._create_folder_in(self._selected_folder_id())
+
+    def _create_folder_in(self, parent_id: str | None) -> None:
         if not self._has_project():
             return
         name, accepted = QInputDialog.getText(self, "新建工作区文件夹", "文件夹名称")
@@ -1139,7 +1390,7 @@ class MainWindow(QMainWindow):
                     display_name=name,
                     actor=self._actor,
                     expected_workspace_revision=self._workspace_revision,
-                    parent_workspace_item_id=self._selected_folder_id(),
+                    parent_workspace_item_id=parent_id,
                 )
             ),
             lambda _result: self._reload_workspace(),
@@ -1148,6 +1399,18 @@ class MainWindow(QMainWindow):
     def _move_item(self, item_id: str, parent_id, ordinal: int) -> None:
         if not self._has_project():
             return
+        if parent_id == item_id:
+            return
+        view = self._views.get(item_id)
+        if view is None:
+            return
+        old_parent = view.placement.parent_workspace_item_id
+        old_ordinal = view.placement.ordinal
+        if parent_id == old_parent and ordinal > old_ordinal:
+            ordinal -= 1
+        if parent_id == old_parent and ordinal == old_ordinal:
+            return
+        project_id = self._project_id
         self._run_background(
             "移动工作区项目",
             lambda: self._application.move_workspace_item(
@@ -1159,6 +1422,80 @@ class MainWindow(QMainWindow):
                     expected_workspace_revision=self._workspace_revision,
                     new_parent_workspace_item_id=parent_id,
                     new_ordinal=ordinal,
+                )
+            ),
+            lambda result: self._move_completed(
+                project_id, item_id, old_parent, old_ordinal, result.workspace_revision
+            ),
+        )
+
+    def _move_completed(
+        self, project_id: str, item_id: str, old_parent: str | None,
+        old_ordinal: int, revision: int,
+    ) -> None:
+        self._last_move_undo = (project_id, item_id, old_parent, old_ordinal, revision)
+        self.undo_move_action.setEnabled(True)
+        self._reload_workspace()
+
+    def _undo_last_move(self) -> None:
+        pending = self._last_move_undo
+        if pending is None or not self._has_project() or self._worker_thread is not None:
+            return
+        project_id, item_id, old_parent, old_ordinal, revision = pending
+        if project_id != self._project_id or revision != self._workspace_revision:
+            self._last_move_undo = None
+            self.undo_move_action.setEnabled(False)
+            self._reload_workspace()
+            return
+        self._run_background(
+            "撤销上次移动",
+            lambda: self._application.move_workspace_item(
+                MoveWorkspaceItemRequest(
+                    project_id=project_id,
+                    database_path=self._database_path,
+                    workspace_item_id=item_id,
+                    actor=self._actor,
+                    expected_workspace_revision=revision,
+                    new_parent_workspace_item_id=old_parent,
+                    new_ordinal=old_ordinal,
+                    undo_of_workspace_revision=revision,
+                )
+            ),
+            self._move_undone,
+        )
+
+    def _move_undone(self, _result) -> None:
+        self._last_move_undo = None
+        self.undo_move_action.setEnabled(False)
+        self.statusBar().showMessage("已撤销上次移动")
+        self._reload_workspace()
+
+    def _show_drag_destination(self, hint: str) -> None:
+        self.drag_destination.setText(hint)
+        self.drag_destination.setVisible(bool(hint))
+
+    def _rename_item(self, item_id: str) -> None:
+        view = self._views.get(item_id)
+        if view is None or not view.effectively_active or not self._has_project():
+            return
+        name, accepted = QInputDialog.getText(
+            self, "重命名工作区项目",
+            "新名称（保留文件扩展名；仅改变工作区与导出名称，"
+            "不重命名已生成的工作副本）",
+            text=view.item.display_name,
+        )
+        if not accepted or name.strip() == view.item.display_name:
+            return
+        self._run_background(
+            "重命名工作区项目",
+            lambda: self._application.rename_workspace_item(
+                RenameWorkspaceItemRequest(
+                    project_id=self._project_id,
+                    database_path=self._database_path,
+                    workspace_item_id=item_id,
+                    display_name=name,
+                    actor=self._actor,
+                    expected_workspace_revision=self._workspace_revision,
                 )
             ),
             lambda _result: self._reload_workspace(),
@@ -1399,19 +1736,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "导出", "请先选择一个或多个项目。")
             return
         selected = tuple(self._views[item_id] for item_id in item_ids)
-        if any(
-            view.item.item_kind == WorkspaceItemKind.CONTAINER_VIEW
-            for view in selected
-        ):
-            QMessageBox.warning(
-                self,
-                "导出",
-                "Container View 不能直接导出；请选择普通工作区文件夹或 Terminal File。",
-            )
-            return
         single = selected[0] if len(selected) == 1 else None
         directory_export = (
-            single is not None and single.item.item_kind == WorkspaceItemKind.FOLDER
+            single is not None and single.item.item_kind in {
+                WorkspaceItemKind.FOLDER, WorkspaceItemKind.CONTAINER_VIEW,
+            }
         )
         if directory_export:
             parent = QFileDialog.getExistingDirectory(self, "选择导出文件夹的上级目录")
@@ -1419,7 +1748,11 @@ class MainWindow(QMainWindow):
                 return
             destination = (
                 Path(parent).absolute()
-                / safe_filesystem_segment(single.item.display_name)
+                / safe_filesystem_segment(
+                    single.item.display_name + "-展开"
+                    if single.item.item_kind == WorkspaceItemKind.CONTAINER_VIEW
+                    else single.item.display_name
+                )
             )
             if destination.exists() or destination.is_symlink():
                 QMessageBox.warning(
@@ -1531,7 +1864,7 @@ class MainWindow(QMainWindow):
                 self.search_results.setItem(row, column, cell)
         self.left_tabs.setCurrentWidget(self.search_results)
         suffix = "（仅显示前 200 条）" if result.has_more else ""
-        self.statusBar().showMessage(f"找到 {result.total} 个 Workspace Item{suffix}")
+        self.statusBar().showMessage(f"找到 {result.total} 项{suffix}")
 
     def _clear_search(self) -> None:
         self.search_text.clear()
@@ -1567,7 +1900,21 @@ class MainWindow(QMainWindow):
 
     def _apply_workspace(self, result, events) -> None:
         selected_id = self.open_selected_button.property("workspace_item_id")
+        expanded_ids = (
+            tuple(
+                item_id for item_id in self.tree.model().views
+                if self.tree.isExpanded(self.tree.model().index_for_id(item_id))
+            ) if self._tree_initialized else ()
+        )
         self._workspace_revision = result.workspace_revision
+        if self._last_move_undo is not None and (
+            self._last_move_undo[0] != self._project_id
+            or self._last_move_undo[4] != result.workspace_revision
+        ):
+            self._last_move_undo = None
+        self.undo_move_action.setEnabled(
+            self._last_move_undo is not None and not self._recovery_required
+        )
         self.context_view.update_workspace_revision(result.workspace_revision)
         self._views = {
             view.item.id: view for view in (*result.items, *result.deleted_items)
@@ -1582,7 +1929,14 @@ class MainWindow(QMainWindow):
         self.project_meta.setToolTip(str(self._database_path))
         self._set_project_state("工作区就绪", "ready")
         self.tree.set_views(result.items)
-        self.tree.expandToDepth(1)
+        if self._tree_initialized:
+            for item_id in expanded_ids:
+                index = self.tree.model().index_for_id(item_id)
+                if index.isValid():
+                    self.tree.setExpanded(index, True)
+        else:
+            self.tree.expandToDepth(1)
+            self._tree_initialized = True
         self.deleted_items.setRowCount(0)
         for view in result.deleted_items:
             row = self.deleted_items.rowCount()
@@ -1607,7 +1961,7 @@ class MainWindow(QMainWindow):
         else:
             self._show_view(None)
         self.statusBar().showMessage(
-            f"{len(result.items)} 个活动项目 · {len(result.deleted_items)} 个已删除项目"
+            f"{len(result.items)} 项文件与文件夹 · {len(result.deleted_items)} 项在回收站"
         )
 
     def _tree_selection_changed(self) -> None:
@@ -1649,6 +2003,10 @@ class MainWindow(QMainWindow):
     def _show_tree_context_menu(self, position) -> None:
         item = self.tree.itemAt(position)
         if item is None:
+            if self._has_project() and self._worker_thread is None:
+                menu = QMenu(self)
+                menu.addAction("在根目录新建文件夹", lambda: self._create_folder_in(None))
+                menu.exec(self.tree.viewport().mapToGlobal(position))
             return
         if not item.isSelected():
             self.tree.clearSelection()
@@ -1685,6 +2043,19 @@ class MainWindow(QMainWindow):
             return None
         menu = QMenu(self)
         selected_ids = self._selected_export_ids()
+        if view.item.item_kind == WorkspaceItemKind.FOLDER and len(selected_ids) == 1:
+            menu.addAction(
+                "在此新建文件夹", lambda: self._create_folder_in(item_id)
+            )
+            menu.addSeparator()
+        if len(selected_ids) == 1 and view.item.item_kind in {
+            WorkspaceItemKind.FILE, WorkspaceItemKind.FOLDER,
+        }:
+            menu.addAction("重命名", lambda: self._rename_item(item_id))
+            menu.addSeparator()
+        if len(selected_ids) == 1 and view.item.item_kind == WorkspaceItemKind.FILE:
+            menu.addAction("查看物理位置", lambda: self._show_physical_location(item_id))
+            menu.addSeparator()
         if (
             view.item.item_kind == WorkspaceItemKind.FILE
             and view.source_node is not None
@@ -1705,6 +2076,19 @@ class MainWindow(QMainWindow):
             if view.previous_revision is not None:
                 menu.addAction("回滚到上一版本", self._rollback_working_file)
             menu.addSeparator()
+        elif (
+            view.item.item_kind == WorkspaceItemKind.CONTAINER_VIEW
+            and view.source_node is not None
+            and view.source_node.format == NodeFormat.EML
+            and len(selected_ids) == 1
+        ):
+            menu.addAction(
+                "加入 Project Context（EML 原邮件）",
+                lambda: self.context_view.promote_workspace_item(
+                    item_id, view.item.display_name
+                ),
+            )
+            menu.addSeparator()
         menu.addAction(
             "导出所选" if len(selected_ids) > 1 else "导出",
             self._export_selected,
@@ -1718,6 +2102,38 @@ class MainWindow(QMainWindow):
                     lambda: self._undo_import_item(item_id),
                 )
         return menu
+
+    def _show_physical_location(self, item_id: str) -> None:
+        if not self._has_project():
+            return
+        self._run_background(
+            "读取物理位置",
+            lambda: self._application.get_workspace_physical_location(
+                GetWorkspacePhysicalLocationRequest(
+                    project_id=self._project_id,
+                    database_path=self._database_path,
+                    workspace_item_id=item_id,
+                )
+            ),
+            self._physical_location_ready,
+        )
+
+    def _physical_location_ready(self, result) -> None:
+        working = (str(result.working_path) if result.working_path is not None
+                   else "尚未生成独立工作文件；打开此文件后再查看。")
+        original = (str(result.original_path) if result.original_path is not None
+                    else "无可用的独立原始文件路径。")
+        if result.original_is_parent_container and result.original_path is not None:
+            original += "\n（这是所在原始容器，文件本身不是独立物理文件。）"
+        box = QMessageBox(self)
+        box.setWindowTitle("文件物理位置")
+        box.setText(
+            f"当前工作文件：\n{working}\n\n"
+            f"原始备份或所在容器：\n{original}\n\n"
+            f"工作区相对位置：\n{result.logical_path}"
+        )
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        box.exec()
 
     def _show_deleted_context_menu(self, position) -> None:
         item = self.deleted_items.itemAt(position)
@@ -1750,23 +2166,36 @@ class MainWindow(QMainWindow):
         view = self._views.get(item_id)
         for button in (
             self.open_selected_button,
+            self.add_to_context_button,
+            self.more_file_button,
             self.refresh_file_button,
             self.restore_working_button,
             self.rollback_button,
         ):
             button.setProperty("workspace_item_id", item_id)
         if view is None:
-            self.detail_title.setText("未选择项目")
-            self.detail_subtitle.setText("在左侧选择一个文件或文件夹查看详情")
+            self.detail_title.setText("未选择文件")
+            self.detail_subtitle.setText("")
+            self.detail_status.hide()
             self.details.setHtml(self._empty_detail_html())
             self.versions.setRowCount(0)
             self._update_item_buttons(None)
             return
         self.detail_title.setText(view.item.display_name)
         self.detail_subtitle.setText(view.workspace_path)
+        self.detail_status.setText(
+            self._friendly_value(self._working_status(view))
+            if (view.item.item_kind == WorkspaceItemKind.FILE
+                or self._working_status(view) in _SOURCE_FAILURE_STATUSES)
+            else self._friendly_value(view.item.item_kind.value)
+        )
+        self.detail_status.show()
         self.details.setHtml(self._detail_html(view))
         self._show_versions(view)
         self._update_item_buttons(view)
+        if self.right_tabs.currentWidget() is self.events:
+            self.right_tabs.setCurrentWidget(self.details_page)
+            self.activity_button.setText("活动记录")
 
     def _detail_html(self, view: WorkspaceItemView) -> str:
         def row(label: str, value: object, *, code: bool = False) -> str:
@@ -1896,7 +2325,32 @@ class MainWindow(QMainWindow):
         )
         is_file = available and view.item.item_kind == WorkspaceItemKind.FILE
         working = None if view is None else view.working_artifact
+        promotable_shape = (
+            view is not None and view.effectively_active
+            and view.source_node is not None
+            and (
+                (view.item.item_kind == WorkspaceItemKind.FILE
+                 and view.source_node.kind == NodeKind.FILE)
+                or (view.item.item_kind == WorkspaceItemKind.CONTAINER_VIEW
+                    and view.source_node.format == NodeFormat.EML)
+            )
+        )
+        self.open_selected_button.setVisible(
+            view is not None and view.item.item_kind == WorkspaceItemKind.FILE
+            and view.effectively_active
+        )
+        self.add_to_context_button.setVisible(promotable_shape)
+        self.restore_deleted_button.setVisible(
+            view is not None and not view.effectively_active
+        )
+        self.more_file_button.setVisible(view is not None)
+        self.more_file_button.setEnabled(available or (
+            view is not None and not view.effectively_active
+            and self._worker_thread is None and not self._recovery_required
+        ))
+        self.advanced_toggle.setVisible(view is not None)
         self.open_selected_button.setEnabled(is_file)
+        self.add_to_context_button.setEnabled(available and promotable_shape)
         self.refresh_file_button.setEnabled(is_file and working is not None)
         self.restore_working_button.setEnabled(
             is_file
@@ -1935,6 +2389,12 @@ class MainWindow(QMainWindow):
         )
 
     def _selected_active_id(self):
+        if self.left_tabs.currentWidget() is self.search_results:
+            rows = self.search_results.selectionModel().selectedRows()
+            return (
+                self._selected_table_id(self.search_results, rows[0].row())
+                if len(rows) == 1 else None
+            )
         selected = self.tree.selectedItems()
         return None if not selected else selected[0].data(0, ITEM_ID_ROLE)
 
@@ -1950,9 +2410,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _working_status(view: WorkspaceItemView) -> str:
-        if view.working_artifact is not None:
-            return view.working_artifact.content_status.value
-        return view.item.materialization_status.value
+        return _visible_file_status(view)
 
     @staticmethod
     def _format_bytes(value: int) -> str:
@@ -1965,12 +2423,31 @@ class MainWindow(QMainWindow):
 
     def _populate_events(self, events) -> None:
         recent = list(events)[-300:]
+        undone_revisions = {
+            event.details.get("undo_of_workspace_revision")
+            for event in recent
+            if event.event_type == EventType.WORKSPACE_ITEM_MOVED
+            and event.details.get("undo_of_workspace_revision") is not None
+        }
+        recent = [
+            event for event in recent
+            if not (
+                event.event_type == EventType.WORKSPACE_ITEM_MOVED
+                and event.details.get("workspace_revision") in undone_revisions
+            )
+        ]
         self.events.setRowCount(len(recent))
         for row, event in enumerate(reversed(recent)):
+            event_label = (
+                "已撤销移动"
+                if event.event_type == EventType.WORKSPACE_ITEM_MOVED
+                and event.details.get("undo_of_workspace_revision") is not None
+                else event.event_type.value
+            )
             values = (
                 self._local_event_time(event.occurred_at),
                 event.severity.value,
-                event.event_type.value,
+                event_label,
                 event.workspace_item_id or "",
                 "" if event.error_code is None else event.error_code.value,
             )
@@ -2027,6 +2504,14 @@ class MainWindow(QMainWindow):
         try:
             result = future.result()
         except BaseException as exc:
+            if isinstance(exc, ApplicationError) and exc.code == "RECOVERY_REQUIRED":
+                self._recovery_required = True
+                self._set_project_state("需要恢复", "warning")
+                self.statusBar().showMessage(
+                    "项目存在未完成的文件操作；请先检查并恢复，再重试当前操作"
+                )
+                self._inspect_active_project_recovery()
+                return
             self._show_failure(operation, exc)
             if isinstance(exc, ApplicationError):
                 if exc.code in {
@@ -2059,11 +2544,16 @@ class MainWindow(QMainWindow):
             self.search_text,
             self.format_filter,
             self.content_filter,
+            self.filter_button,
             self.search_button,
             self.clear_search_button,
+            self.trash_button,
+            self.activity_button,
             self.tree,
         ):
             widget.setEnabled(not busy)
+        if not busy and self.left_tabs.currentWidget() is self.deleted_items:
+            self.search_text.setEnabled(False)
         current = self._views.get(
             self.open_selected_button.property("workspace_item_id")
         )
@@ -2097,8 +2587,31 @@ class MainWindow(QMainWindow):
         if isinstance(exc, ApplicationError):
             if exc.code == "OPERATION_CANCELLED":
                 QMessageBox.information(self, operation, "操作已在安全检查点停止。")
+            elif exc.code in {
+                "UNSUPPORTED_PROJECT_SCHEMA_REVISION",
+                "PROJECT_UPGRADE_REQUIRED",
+            }:
+                QMessageBox.warning(
+                    self, operation,
+                    "此项目使用旧版数据库结构，当前源码不会自动迁移或改写它。"
+                    "请新建项目并重新导入测试资料；如需保留旧项目数据，请单独提出迁移需求。"
+                    f"\n\n错误码：{exc.code}",
+                )
             else:
                 QMessageBox.warning(self, operation, f"{exc.message}\n\n错误码：{exc.code}")
+        elif isinstance(exc, PermissionError):
+            self._logger.error(
+                "desktop operation denied by filesystem permissions: %s",
+                operation,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            QMessageBox.warning(
+                self,
+                operation,
+                "当前程序无法写入所选位置。请检查文件夹权限；如果程序是从受限的"
+                "测试环境启动，请改从本机终端启动源码桌面端后重试。"
+                f"\n\n位置：{exc.filename or '未提供'}",
+            )
         else:
             self._logger.error(
                 "desktop background operation failed: %s",
@@ -2127,6 +2640,7 @@ class MainWindow(QMainWindow):
             OperationStage.EXPORT_VERIFICATION: "正在校验导出文件",
             OperationStage.FINALIZING: "正在完成原子发布",
             OperationStage.CONTEXT_CAPTURE: "正在捕获 Context Revision",
+            OperationStage.CONTENT_EXTRACTION: "正在提取固定 Revision 内容",
             OperationStage.COMPLETED: "操作完成",
         }
         ratio = snapshot.ratio

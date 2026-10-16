@@ -15,11 +15,15 @@ QWidget {
     font-size: 13px;
 }
 
-QFrame#projectHeader,
-QFrame#searchPanel {
+QFrame#projectHeader {
     background: #ffffff;
     border: 1px solid #dce2e8;
     border-radius: 8px;
+}
+
+QFrame#searchPanel {
+    background: #ffffff;
+    border: none;
 }
 
 QLabel#productEyebrow {
@@ -40,6 +44,18 @@ QLabel#sectionHint,
 QLabel#detailSubtitle {
     color: #687686;
     font-size: 12px;
+}
+
+QLabel#detailStatus {
+    color: #315f86;
+    background: #e8f0f7;
+    border-radius: 5px;
+    padding: 5px 8px;
+}
+
+QLabel#guidancePreview {
+    color: #334155;
+    padding: 7px 0 12px 0;
 }
 
 QLabel#projectState {
@@ -70,6 +86,14 @@ QLabel#recoveryBanner {
     background: #fff7e8;
     border: 1px solid #efcf97;
     border-radius: 6px;
+}
+
+QLabel#dragDestination {
+    padding: 6px 10px;
+    color: #246454;
+    background: #e8f4ef;
+    border: 1px solid #acd5c6;
+    border-radius: 5px;
 }
 
 QLabel#searchTitle,
@@ -143,6 +167,31 @@ QPushButton[variant="quiet"] {
 
 QPushButton[variant="quiet"]:hover {
     background: #edf1f5;
+}
+
+QToolButton {
+    min-height: 32px;
+    padding: 0 10px;
+    background: #ffffff;
+    color: #334155;
+    border: 1px solid #cdd5dd;
+    border-radius: 6px;
+}
+
+QToolButton:hover {
+    background: #f2f5f8;
+    border-color: #91a9bd;
+}
+
+QToolButton:checked {
+    background: #e8f0f7;
+    color: #315f86;
+}
+
+QToolButton:disabled {
+    background: #f3f5f7;
+    color: #9aa5b1;
+    border-color: #e1e6eb;
 }
 
 QToolBar#mainToolbar {

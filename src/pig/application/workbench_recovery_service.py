@@ -80,12 +80,17 @@ class WorkbenchRecoveryService:
                 for value in snapshots
                 if value.status == OriginalSnapshotStatus.PURGED
             )
-            known_original_keys = frozenset(
-                artifact.storage_key
-                for snapshot in snapshots
-                for artifact in uow.imports.original_artifacts_for_snapshot(snapshot.id)
-                if artifact.integrity_status != ArtifactIntegrityStatus.PURGED
-            )
+            registered_original_keys: set[str] = set()
+            for snapshot in snapshots:
+                artifacts = tuple(uow.imports.original_artifacts_for_snapshot(snapshot.id))
+                registered_original_keys.update(
+                    artifact.storage_key for artifact in artifacts
+                    if artifact.integrity_status != ArtifactIntegrityStatus.PURGED
+                )
+                if snapshot.status == OriginalSnapshotStatus.READY and not artifacts:
+                    # An empty imported folder owns a Snapshot root but no file artifacts.
+                    registered_original_keys.add(f"originals/{snapshot.id}")
+            known_original_keys = frozenset(registered_original_keys)
             active_items = tuple(
                 item
                 for item in uow.workspace.items_for_project(

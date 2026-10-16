@@ -48,6 +48,23 @@ EXPECTED_TABLES = {
     "context_pack_entries",
     "context_pack_sections",
     "context_pack_placements",
+    "extraction_runs",
+    "content_documents",
+    "content_elements",
+    "content_fts",
+    "content_fts_config",
+    "content_fts_data",
+    "content_fts_docsize",
+    "content_fts_idx",
+    "experience_records",
+    "experience_versions",
+    "experience_state_changes",
+    "experience_revision_links",
+    "experience_event_links",
+    "ai_analysis_runs",
+    "ai_analysis_inputs",
+    "ai_analysis_claims",
+    "ai_analysis_citations",
 }
 
 
@@ -79,7 +96,7 @@ def test_upgrade_creates_the_complete_initial_schema(database_path: Path) -> Non
             )
         )
 
-    assert revision == "0013_context_pack_events"
+    assert revision == "0017_workspace_rename_event"
     project_columns = {
         column["name"] for column in schema.get_columns("projects")
     }
@@ -113,7 +130,7 @@ def test_v221_database_upgrades_to_v22_events(tmp_path: Path) -> None:
     upgrade_database(database_path)
     engine = create_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0013_context_pack_events"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0017_workspace_rename_event"
     command.check(alembic_config(database_path))
 
 

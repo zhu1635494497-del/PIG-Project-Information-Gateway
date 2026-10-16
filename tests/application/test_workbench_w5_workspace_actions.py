@@ -12,6 +12,8 @@ from pig.application.contracts import (
     ImportProjectItemsRequest,
     InspectImportSessionRequest,
     MoveWorkspaceItemRequest,
+    RenameWorkspaceItemRequest,
+    GetWorkspaceTreeRequest,
     RestoreWorkspaceItemRequest,
     SoftDeleteWorkspaceItemRequest,
 )
@@ -47,6 +49,100 @@ def _folder(application, project, name, revision, *, parent=None, ordinal=None):
             expected_workspace_revision=revision,
         )
     )
+
+
+def test_rename_changes_only_workspace_name_and_records_event(tmp_path: Path) -> None:
+    application, project = _project(tmp_path)
+    folder = _folder(application, project, "原文件夹", 0)
+    child = _folder(
+        application, project, "子文件夹", 1, parent=folder.item.id
+    )
+    renamed = application.rename_workspace_item(
+        RenameWorkspaceItemRequest(
+            project_id=project.project_id,
+            database_path=project.database_path,
+            workspace_item_id=folder.item.id,
+            display_name="新文件夹",
+            actor="tester",
+            expected_workspace_revision=2,
+        )
+    )
+    assert renamed.workspace_revision == 3
+    assert renamed.item.display_name == "新文件夹"
+    tree = application.get_workspace_tree(GetWorkspaceTreeRequest(
+        project_id=project.project_id, database_path=project.database_path,
+    ))
+    paths = {view.item.id: view.workspace_path for view in tree.items}
+    assert paths[folder.item.id] == "新文件夹"
+    assert paths[child.item.id] == "新文件夹/子文件夹"
+    with SqlAlchemyProjectDatabase().unit_of_work(project.database_path) as uow:
+        events = uow.processing.events_for_project(project.project_id)
+    assert any(event.event_type == EventType.WORKSPACE_ITEM_RENAMED for event in events)
+
+    unchanged = application.rename_workspace_item(
+        RenameWorkspaceItemRequest(
+            project_id=project.project_id,
+            database_path=project.database_path,
+            workspace_item_id=folder.item.id,
+            display_name="新文件夹",
+            actor="tester",
+            expected_workspace_revision=3,
+        )
+    )
+    assert unchanged.workspace_revision == 3
+    with pytest.raises(ApplicationError) as stale:
+        application.rename_workspace_item(
+            RenameWorkspaceItemRequest(
+                project_id=project.project_id,
+                database_path=project.database_path,
+                workspace_item_id=folder.item.id,
+                display_name="过期写入",
+                actor="tester",
+                expected_workspace_revision=2,
+            )
+        )
+    assert stale.value.code == "WORKSPACE_REVISION_CONFLICT"
+
+
+def test_file_rename_preserves_origin_and_extension(tmp_path: Path) -> None:
+    application, project = _project(tmp_path)
+    source = tmp_path / "原简报.txt"
+    source.write_bytes(b"synthetic original")
+    application.add_workspace_inputs(AddWorkspaceInputsRequest(
+        project_id=project.project_id,
+        database_path=project.database_path,
+        input_paths=(source,),
+        actor="tester",
+        expected_workspace_revision=0,
+    ))
+    before = application.get_workspace_tree(GetWorkspaceTreeRequest(
+        project_id=project.project_id, database_path=project.database_path,
+    )).items[0]
+    renamed = application.rename_workspace_item(RenameWorkspaceItemRequest(
+        project_id=project.project_id,
+        database_path=project.database_path,
+        workspace_item_id=before.item.id,
+        display_name="最终简报.txt",
+        actor="tester",
+        expected_workspace_revision=1,
+    ))
+    assert renamed.item.display_name == "最终简报.txt"
+    after = application.get_workspace_tree(GetWorkspaceTreeRequest(
+        project_id=project.project_id, database_path=project.database_path,
+    )).items[0]
+    assert after.source_node.id == before.source_node.id
+    assert after.source_node.original_name == "原简报.txt"
+    assert source.read_bytes() == b"synthetic original"
+    with pytest.raises(ApplicationError) as invalid:
+        application.rename_workspace_item(RenameWorkspaceItemRequest(
+            project_id=project.project_id,
+            database_path=project.database_path,
+            workspace_item_id=before.item.id,
+            display_name="最终简报.pdf",
+            actor="tester",
+            expected_workspace_revision=2,
+        ))
+    assert invalid.value.code == "INVALID_WORKSPACE_NAME"
 
 
 def test_create_move_delete_restore_is_revisioned_and_survives_restart(

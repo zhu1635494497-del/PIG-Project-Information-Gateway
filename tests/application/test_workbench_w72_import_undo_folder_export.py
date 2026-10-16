@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+import zipfile
 
 import pytest
+import py7zr
 
 from pig.application import (
     AddWorkspaceInputsRequest,
     CreateProjectRequest,
     ExportWorkspaceItemsRequest,
     GetWorkspaceTreeRequest,
+    GetWorkspacePhysicalLocationRequest,
     PreviewImportUndoRequest,
     UndoImportedItemRequest,
 )
@@ -22,6 +25,7 @@ from pig.domain.enums import (
     SourceStatus,
     WorkspaceExportKind,
     WorkspaceItemLifecycleStatus,
+    WorkspaceItemKind,
 )
 from pig.infrastructure.database.provider import SqlAlchemyProjectDatabase
 
@@ -208,6 +212,109 @@ def test_folder_export_preserves_structure_empty_folders_and_current_bytes(
                 project_id=project.project_id,
                 database_path=project.database_path,
                 workspace_item_ids=(root.item.id,),
+                destination_path=destination,
+                actor="tester",
+                confirmed_replace=True,
+            )
+        )
+    assert exists.value.code == "EXPORT_DESTINATION_INVALID"
+
+
+def test_physical_location_distinguishes_original_and_lazy_working_file(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "report.txt"
+    source.write_bytes(b"original")
+    application, project = _project(tmp_path)
+    _add(application, project, (source,))
+    item = next(value for value in _tree(application, project).items
+                if value.item.display_name == "report.txt")
+    request = GetWorkspacePhysicalLocationRequest(
+        project_id=project.project_id,
+        database_path=project.database_path,
+        workspace_item_id=item.item.id,
+    )
+    before = application.get_workspace_physical_location(request)
+    assert before.working_path is None
+    assert before.original_path is not None
+    assert before.original_path.read_bytes() == b"original"
+    assert not before.original_is_parent_container
+    materialized = application.materialize_workspace_item(
+        MaterializeWorkspaceItemRequest(
+            project_id=project.project_id,
+            database_path=project.database_path,
+            workspace_item_id=item.item.id,
+            actor="tester",
+        )
+    )
+    after = application.get_workspace_physical_location(request)
+    assert after.working_path == materialized.path
+    assert after.original_path == before.original_path
+
+
+@pytest.mark.parametrize("archive_type", ("zip", "7z"))
+def test_container_view_exports_current_expanded_structure_without_repacking(
+    tmp_path: Path, archive_type: str,
+) -> None:
+    source = tmp_path / f"资料.{archive_type}"
+    if archive_type == "zip":
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("子目录/报告.txt", b"original")
+    else:
+        with py7zr.SevenZipFile(source, "w") as archive:
+            archive.writestr(b"original", "子目录/报告.txt")
+    original_bytes = source.read_bytes()
+    application, project = _project(tmp_path)
+    _add(application, project, (source,))
+    tree = _tree(application, project)
+    containers = [
+        view for view in tree.items
+        if view.item.item_kind == WorkspaceItemKind.CONTAINER_VIEW
+        and view.placement.parent_workspace_item_id is None
+    ]
+    assert containers, [(value.item.display_name, value.item.item_kind) for value in tree.items]
+    container = containers[0]
+    report = next(view for view in tree.items if view.item.display_name == "报告.txt")
+    location = application.get_workspace_physical_location(
+        GetWorkspacePhysicalLocationRequest(
+            project_id=project.project_id,
+            database_path=project.database_path,
+            workspace_item_id=report.item.id,
+        )
+    )
+    assert location.working_path is None
+    assert location.original_is_parent_container
+    assert location.original_path is not None
+    assert location.original_path.read_bytes() == original_bytes
+    materialized = application.materialize_workspace_item(
+        MaterializeWorkspaceItemRequest(
+            project_id=project.project_id,
+            database_path=project.database_path,
+            workspace_item_id=report.item.id,
+            actor="tester",
+        )
+    )
+    materialized.path.write_bytes(b"current working")
+    destination = tmp_path / "deliverables" / f"资料.{archive_type}-展开"
+    destination.parent.mkdir()
+    result = application.export_workspace_items(
+        ExportWorkspaceItemsRequest(
+            project_id=project.project_id,
+            database_path=project.database_path,
+            workspace_item_ids=(container.item.id,),
+            destination_path=destination,
+            actor="tester",
+        )
+    )
+    assert result.export_kind == WorkspaceExportKind.DIRECTORY
+    assert (destination / "子目录" / "报告.txt").read_bytes() == b"current working"
+    assert source.read_bytes() == original_bytes
+    with pytest.raises(ApplicationError) as exists:
+        application.export_workspace_items(
+            ExportWorkspaceItemsRequest(
+                project_id=project.project_id,
+                database_path=project.database_path,
+                workspace_item_ids=(container.item.id,),
                 destination_path=destination,
                 actor="tester",
                 confirmed_replace=True,

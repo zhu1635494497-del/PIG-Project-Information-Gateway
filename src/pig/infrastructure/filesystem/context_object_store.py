@@ -49,6 +49,21 @@ class _CaptureWriter:
 class LocalContextObjectStore:
     """Per-Project, content-addressed, immutable Context object storage."""
 
+    def verified_path(self, project_path: Path, object_key: str, *,
+                      expected_size: int, expected_sha256: str) -> Path:
+        project = Path(project_path).resolve(strict=True)
+        relative = PurePosixPath(object_key)
+        if (
+            not _SHA256.fullmatch(expected_sha256)
+            or relative.is_absolute()
+            or relative.parts != ("context", "objects", expected_sha256[:2], expected_sha256)
+        ):
+            raise ApplicationError("UNSAFE_WORKSPACE", "invalid Context object key")
+        target = project.joinpath(*relative.parts)
+        self._safe_parent(project, target.parent, create=False)
+        self._verify_existing(target, expected_size, expected_sha256)
+        return target
+
     def available_space(self, project_path: Path) -> int:
         project = Path(project_path).resolve(strict=True)
         return shutil.disk_usage(project).free

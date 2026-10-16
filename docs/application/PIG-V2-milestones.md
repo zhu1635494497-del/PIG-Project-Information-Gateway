@@ -1,15 +1,16 @@
 # PIG V2 开发里程碑 / PIG V2 Development Milestones
 
-- 状态：D120-A 至 D126-A 已批准；V2.2.2–V2.2.4 获一次性授权 / Status: D120-A through D126-A approved; V2.2.2–V2.2.4 authorized together
+- 当前阶段与授权以 [CURRENT_SCOPE](../project-rules/CURRENT_SCOPE.md) 为准 / Active phase and authorization follow [CURRENT_SCOPE](../project-rules/CURRENT_SCOPE.md)
 - 日期：2026-10-08 / Date: 2026-10-08
 - 约束决策：`ADR-024`、`ADR-025`、`ADR-026` / Governing decisions: `ADR-024`, `ADR-025`, `ADR-026`
 
-每个 Milestone 必须单独进入并完成最小可运行、最小可测试、数据流闭环后才能进入
-下一阶段。路线批准不等于后续代码自动授权。
+每个 Milestone 完成最小可运行、最小可测试、数据流闭环后才能进入下一阶段。
+具体授权以 CURRENT_SCOPE 和负责人后续决定为准；历史分段停止线不得覆盖新的
+一次性授权。
 
-Each Milestone requires explicit entry and must complete a minimum runnable,
-testable data loop before the next. Roadmap approval does not automatically
-authorize later code.
+Each Milestone completes a minimum runnable, testable data loop before the next.
+Concrete authority follows CURRENT_SCOPE and subsequent owner decisions; historical
+stage-by-stage stop lines do not override later combined authorization.
 
 ## V2.0：规划基线 / Planning baseline
 
@@ -109,56 +110,66 @@ authorized V2.2.2–V2.2.4 together.
 
 - **目标 / Goal**：将确定的 Context Revision 转换为可定位、可搜索的内容。
 - **输入 / Input**：用户选择的 READY Context Revision。
-- **核心实现 / Core work**：Extractor Port、候选 Docling Spike、自有 XLSX/CSV/Email
-  Extractor、Canonical Content、Source Locator、FTS5、后台进度与重建。
+- **核心实现 / Core work**：按 D127-A 先完成 TXT/CSV/EML/XLSX 的确定性 Extractor、
+  Canonical Content、typed Locator、FTS5、子进程有界执行与重建。PDF/DOCX/PPTX 只在
+  独立评估和依赖批准后纳入后续批次，不属于首批支持格式。
 - **数据落库 / Persistence**：ExtractionRun、ContentDocument、ContentElement、FTS5
   派生索引和 Event。
-- **测试 / Tests**：PDF 页码、DOCX 段落、PPTX Slide、XLSX Sheet/Cell、邮件字段、
-  Unsupported/Partial、同版本幂等、Extractor 升级、删除重建、UI 心跳和资源上限。
-- **验收 / Acceptance**：用户可以搜索 Context 内容，并从结果直接定位到文件和
-  页码、Sheet/Cell、Slide 或邮件字段；不需要 Vector DB。
+- **测试 / Tests**：首批覆盖 TXT 行、CSV 行、邮件字段、XLSX Sheet/Cell、
+  Unsupported/Partial、同版本幂等、Extractor 版本/配置键、索引删除重建、UI 心跳
+  和资源上限；复杂格式定位由独立评估 Gate 验证。
+- **验收 / Acceptance**：用户可检索明确选择的 READY Revision，看到固定版本、
+  片段和可信 Locator，并打开该版本副本核对；不承诺 Host Application 自动跳转。
 
 - **Goal**: Convert fixed Context Revisions into addressable, searchable content.
 - **Input**: Explicitly selected READY Context Revisions.
-- **Core work**: Extractor port, candidate Docling spike, native XLSX/CSV/email
-  extractors, Canonical Content, source locators, FTS5, background progress, and
-  rebuild.
+- **Core work**: Under D127-A, first deliver deterministic TXT/CSV/EML/XLSX extractors,
+  canonical content, typed locators, FTS5, bounded child-process execution, and rebuilding.
+  PDF/DOCX/PPTX enter a later batch only after separate evaluation and dependency approval.
 - **Persistence**: ExtractionRun, ContentDocument, ContentElement, derived FTS5
   index, and Events.
-- **Tests**: PDF pages, DOCX paragraphs, PPTX slides, XLSX sheets/cells, email
-  fields, unsupported/partial outcomes, same-version idempotency, extractor
-  upgrades, delete/rebuild, UI heartbeat, and resource limits.
-- **Acceptance**: The user searches Context content and opens a result at its file
-  and page, sheet/cell, slide, or email field without a vector database.
+- **Tests**: First-batch line, CSV row, email-field, and XLSX sheet/cell locators;
+  unsupported/partial outcomes, equivalent-run reuse, extractor/configuration keys,
+  index deletion/rebuild, UI heartbeat, and limits. Complex-format locations are a separate gate.
+- **Acceptance**: Search an explicitly selected READY Revision, see a fixed version,
+  snippet, and trustworthy locator, and open its preview to verify; host-app deep linking is
+  not promised.
 
-## V2.4：受控 AI Actions / Controlled AI actions
+## V2.4：项目经验与受控 AI / Project experience and controlled AI
 
-- **目标 / Goal**：为明确选择的 Revision 提供可信、有引用的语义辅助。
-- **输入 / Input**：READY Context Revision、Canonical Content、人工 Annotation 和用户
-  选择的 Typed Action。
-- **核心实现 / Core work**：Model Provider Port、集中 Prompt Registry、Outbound
-  Preview、结构化输出校验、Summary/Compare/Extract、Citation 和 Freshness。
-- **数据落库 / Persistence**：AnalysisRun/Input/Result/Citation、模型元数据、状态和
-  Event；Secret 不落库。
-- **测试 / Tests**：Provider 失败、超时、取消、Schema 无效、Citation 越界、文件更新、
-  敏感数据确认、重试幂等、无网络降级。
-- **验收 / Acceptance**：摘要、比较和提取均能回到确定 Revision 和具体 Locator；
-  Workspace 更新后旧结果清楚显示过期但不被篡改。
+本阶段按 [ADR-028](../decisions/ADR-028-v2.4-project-experience-controlled-ai.md) 的
+D133-A–D142-A 分段实施；具体顺序见 [V2.4 决策门](PIG-V2.4-decision-gate.md)。
+V2.4.1 先固定经验、证据与 Bundle 契约；V2.4.2 完成无 AI 的记录、重开与交接；
+V2.4.3–V2.4.5 再逐步接入受控摘要、比较、提取与至少两个合格 Provider；
+V2.4.6 分别验收。具体真实 Provider 与业务资料外发保留独立 Gate。
 
-- **Goal**: Provide trustworthy cited semantic assistance for explicit Revisions.
-- **Input**: READY Context Revisions, Canonical Content, human Annotations, and a
-  user-selected typed action.
-- **Core work**: Model-provider port, centralized prompt registry, outbound
-  preview, structured-output validation, summary/compare/extract actions,
-  Citations, and freshness.
-- **Persistence**: AnalysisRun/Input/Result/Citation, model metadata, states, and
-  Events; secrets remain outside the database.
-- **Tests**: Provider failure, timeout, cancellation, invalid schema, out-of-scope
-  citations, file updates, sensitive-data confirmation, retry idempotency, and
-  offline degradation.
-- **Acceptance**: Summaries, comparisons, and extractions resolve to exact
-  Revisions and Locators; older results clearly become stale after Workspace
-  updates without being rewritten.
+This stage follows D133-A–D142-A in
+[ADR-028](../decisions/ADR-028-v2.4-project-experience-controlled-ai.md); the
+[V2.4 gate](PIG-V2.4-decision-gate.md) gives the sequence. V2.4.1 fixes experience, evidence,
+and Bundle contracts; V2.4.2 closes the no-AI author/reopen/handoff loop; V2.4.3–V2.4.5
+stage cited summary, comparison, extraction, and at least two qualified providers;
+V2.4.6 accepts them separately. Concrete providers and business-data transmission retain
+separate gates.
+
+- **目标 / Goal**：先保留人的项目判断与依据，再为明确选择的固定 Revision 提供有引用
+  的语义辅助；Preserve human judgments and evidence before cited AI assistance.
+- **输入 / Input**：已有 Event、Context Item/Revision、Item Annotation、Canonical
+  Content 与用户选择；existing Events, Context Items/Revisions, guidance, canonical
+  content, and explicit user selection.
+- **核心实现 / Core work**：`ProjectExperienceRecord`、显式证据关系、修改历史、
+  Context Bundle/只读 Query、Provider Port、外发预览、结构化结果与 Citation；
+  experience records/links/history, Bundle/read-only queries, provider port, outbound
+  preview, structured results, and citations.
+- **数据落库 / Persistence**：经验与关系、Context Pack 扩展、AnalysisRun/Input/Result/
+  Citation、状态和 Event；Secret 不落库；persist experience and links, Pack extension,
+  analysis facts, states, and Events, never secrets.
+- **测试 / Tests**：跨文件引用、状态与历史、Bundle 合成消费者、Provider 失败/切换、
+  错误引用、过期、拒绝外发、离线退化；cross-file links, history, Bundle consumer,
+  provider failures/switching, invalid citations, freshness, denial, and offline operation.
+- **验收 / Acceptance**：无模型可记录、重开并交接有来源的人工判断；有模型时至少两个
+  合格 Provider 可选，结果引用能回到固定 Revision/Locator，且不自动成为人工事实；
+  human judgments reopen and transfer without AI; qualified model choice produces cited drafts
+  without automatically promoting them to human facts.
 
 ## V2.5：项目叙事视图 / Project narrative views
 

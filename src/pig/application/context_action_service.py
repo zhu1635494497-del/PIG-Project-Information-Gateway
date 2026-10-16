@@ -51,6 +51,7 @@ from pig.domain.enums import (
     EventSeverity,
     EventType,
     NodeKind,
+    NodeFormat,
     WorkspaceItemKind,
 )
 from pig.domain.exceptions import EntityNotFoundError
@@ -101,7 +102,7 @@ class ContextActionService:
             if (
                 workspace_item is None
                 or workspace_item.project_id != project_id
-                or workspace_item.item_kind != WorkspaceItemKind.FILE
+                or workspace_item.item_kind not in (WorkspaceItemKind.FILE, WorkspaceItemKind.CONTAINER_VIEW)
                 or not uow.workspace.is_effectively_active(workspace_item.id)
                 or workspace_item.origin_source_node_id is None
             ):
@@ -116,7 +117,8 @@ class ContextActionService:
                     ErrorCode.CONTEXT_CAPTURE_SOURCE_MISSING.value,
                     "source node is missing",
                 )
-            if node.kind != NodeKind.FILE:
+            if not (node.kind == NodeKind.FILE or
+                    (workspace_item.item_kind == WorkspaceItemKind.CONTAINER_VIEW and node.format == NodeFormat.EML)):
                 raise ApplicationError(
                     ErrorCode.CONTEXT_ACTION_INVALID.value,
                     "container nodes cannot enter Context",
@@ -195,7 +197,7 @@ class ContextActionService:
             workspace_item = uow.workspace.get_item(request.workspace_item_id)
             if (
                 workspace_item is None or workspace_item.project_id != project_id
-                or workspace_item.item_kind != WorkspaceItemKind.FILE
+                or workspace_item.item_kind not in (WorkspaceItemKind.FILE, WorkspaceItemKind.CONTAINER_VIEW)
                 or not uow.workspace.is_effectively_active(workspace_item.id)
                 or workspace_item.origin_source_node_id is None
             ):
@@ -209,7 +211,8 @@ class ContextActionService:
                     ErrorCode.CONTEXT_CAPTURE_SOURCE_MISSING.value,
                     "source node is missing",
                 )
-            if source_node.kind != NodeKind.FILE:
+            if not (source_node.kind == NodeKind.FILE or
+                    (workspace_item.item_kind == WorkspaceItemKind.CONTAINER_VIEW and source_node.format == NodeFormat.EML)):
                 raise ApplicationError(
                     ErrorCode.CONTEXT_ACTION_INVALID.value,
                     "container nodes cannot enter Context",
@@ -702,6 +705,7 @@ class ContextActionService:
 
     def _cleanup_candidates(self, uow, project_id):
         exported_revisions = uow.context_packs.successful_revision_ids(project_id)
+        experience_revisions = uow.experience.referenced_revision_ids(project_id)
         annotations = {
             value.context_revision_id
             for item in uow.context.items_for_project(project_id)
@@ -734,6 +738,7 @@ class ContextActionService:
                     or revision.is_manually_protected
                     or revision.id in annotations
                     or revision.id in exported_revisions
+                    or revision.id in experience_revisions
                     or revision.content_object_id is None
                 ):
                     continue

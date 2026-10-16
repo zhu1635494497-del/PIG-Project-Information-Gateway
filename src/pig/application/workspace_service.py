@@ -8,6 +8,7 @@ from uuid import uuid4
 from pig.application.contracts import (
     CreateWorkspaceFolderRequest,
     MoveWorkspaceItemRequest,
+    RenameWorkspaceItemRequest,
     RestoreWorkspaceItemRequest,
     SoftDeleteWorkspaceItemRequest,
     WorkspaceMutationResult,
@@ -134,6 +135,13 @@ class WorkspaceActionService:
         project_id, actor, database_path = self._request_identity(
             request.project_id, request.actor, request.database_path
         )
+        if (
+            request.undo_of_workspace_revision is not None
+            and request.undo_of_workspace_revision != request.expected_workspace_revision
+        ):
+            raise ApplicationError(
+                "INVALID_REQUEST", "undo revision must match the current Workspace revision"
+            )
         item_id = self._required(request.workspace_item_id, "workspace_item_id")
         now = self._clock()
         correlation_id = self._new_id()
@@ -179,6 +187,7 @@ class WorkspaceActionService:
                     "new_parent_workspace_item_id": placement.parent_workspace_item_id,
                     "new_ordinal": placement.ordinal,
                     "workspace_revision": updated_project.workspace_revision,
+                    "undo_of_workspace_revision": request.undo_of_workspace_revision,
                 },
             )
             uow.commit()
@@ -186,6 +195,68 @@ class WorkspaceActionService:
                 project_id=project_id,
                 workspace_revision=updated_project.workspace_revision,
                 item=current,
+                placement=placement,
+            )
+
+    def rename(self, request: RenameWorkspaceItemRequest) -> WorkspaceMutationResult:
+        project_id, actor, database_path = self._request_identity(
+            request.project_id, request.actor, request.database_path
+        )
+        item_id = self._required(request.workspace_item_id, "workspace_item_id")
+        display_name = self._logical_segment(request.display_name)
+        now = self._clock()
+        correlation_id = self._new_id()
+        with self._database.unit_of_work(database_path) as uow:
+            project = self._editable_project(
+                uow, project_id, database_path, request.expected_workspace_revision
+            )
+            item = uow.workspace.get_item(item_id)
+            placement = uow.workspace.get_placement(item_id)
+            if item is None or placement is None or item.project_id != project_id:
+                raise ApplicationError("WORKSPACE_ITEM_NOT_FOUND", "Workspace Item was not found")
+            if item.item_kind == WorkspaceItemKind.CONTAINER_VIEW:
+                raise ApplicationError(
+                    "INVALID_WORKSPACE_ACTION", "Container View cannot be renamed"
+                )
+            if item.item_kind == WorkspaceItemKind.FILE and (
+                Path(display_name).suffix.casefold()
+                != Path(item.display_name).suffix.casefold()
+            ):
+                raise ApplicationError(
+                    "INVALID_WORKSPACE_NAME", "Keep the existing file extension when renaming"
+                )
+            if item.display_name == display_name:
+                return WorkspaceMutationResult(
+                    project_id=project_id,
+                    workspace_revision=project.workspace_revision,
+                    item=item,
+                    placement=placement,
+                )
+            try:
+                renamed = uow.workspace.rename_item(
+                    item_id, display_name=display_name, updated_at=now
+                )
+                updated_project = uow.projects.advance_workspace_revision(
+                    project_id, project.workspace_revision, updated_at=now
+                )
+            except (EntityNotFoundError, InvariantViolationError) as exc:
+                raise ApplicationError("INVALID_WORKSPACE_ACTION", str(exc)) from exc
+            except ConcurrentStateError as exc:
+                raise self._revision_conflict(exc) from exc
+            self._event(
+                uow, EventType.WORKSPACE_ITEM_RENAMED, project_id, actor,
+                correlation_id, item_id,
+                details={
+                    "old_name": item.display_name,
+                    "new_name": display_name,
+                    "workspace_revision": updated_project.workspace_revision,
+                },
+            )
+            uow.commit()
+            return WorkspaceMutationResult(
+                project_id=project_id,
+                workspace_revision=updated_project.workspace_revision,
+                item=renamed,
                 placement=placement,
             )
 
